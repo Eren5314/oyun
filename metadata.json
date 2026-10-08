@@ -1,0 +1,8 @@
+{
+  "name": "GameHub Lite",
+  "description": "A browser-based portal featuring three interactive games, including a geometry-style platformer, with seamless sidebar navigation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
