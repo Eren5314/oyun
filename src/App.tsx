@@ -1,11 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Volume2, VolumeX, Gamepad2, Swords, Sparkles, Trophy, Maximize2, Minimize2 } from 'lucide-react';
+import { Volume2, VolumeX, Gamepad2, Swords, Crosshair, Sparkles, Trophy, Maximize2, Minimize2, ExternalLink } from 'lucide-react';
 import { GeometryDashGame } from './components/GeometryDashGame';
 import { HexaConquestOnlineGame } from './components/HexaConquestOnlineGame';
-import { CyberFlapGame } from './components/CyberFlapGame';
+import { CyberTanksOnlineGame } from './components/CyberTanksOnlineGame';
 import { sound } from './utils/sound';
+import alperenAdImg from './assets/images/alperen_oyun_ad_1792046781254.jpg';
 
-type GameId = 'geometry-dash' | 'hexa-conquest' | 'cyber-flap';
+type GameId = 'geometry-dash' | 'hexa-conquest' | 'cyber-tanks';
 
 interface GameInfo {
   id: GameId;
@@ -20,26 +21,26 @@ const GAMES: GameInfo[] = [
   {
     id: 'geometry-dash',
     number: '01',
-    title: 'Geometri Düellosu (Tek & 2 Kişilik)',
-    genre: 'Bölünmüş Ekran · 5 Can · 1X/2X/3X Hız',
-    desc: 'Tek kişilik 10 seviye ve 2 kişilik sonsuz düello! Cube, Ship, Wave modları, izole ekranlar ve 1x/2x/3x hiper hız seçenekleri.',
+    title: 'Geometri Düellosu (Tek & 2K & Online)',
+    genre: 'Ritim Koşusu · Canlı Çok Oyunculu · Garaj',
+    desc: 'Tek kişilik 10 seviye, yerel 2 kişilik sonsuz mod ve gerçek zamanlı Online Düello! 50+ kozmetik, roket ve dalga dönüşümleri.',
     icon: Gamepad2,
   },
   {
     id: 'hexa-conquest',
     number: '02',
     title: 'Hexa Fetih (Online Strateji)',
-    genre: 'Sıra Tabanlı Strateji · Canlı Çok Oyunculu',
-    desc: 'Arkadaşınla aynı oda kodunu girerek canlı oyna! Çoğalma ve atlama taktikleriyle tahtayı fethet.',
+    genre: 'Sıra Tabanlı Alan Hakimiyeti · Hızlı Eşleşme',
+    desc: 'Arkadaşınla canlı oda kur ya da Yapay Zekaya karşı taktik savaş ver! Çoğalma ve 2 kare atlama hamleleriyle tahtayı ele geçir.',
     icon: Swords,
   },
   {
-    id: 'cyber-flap',
+    id: 'cyber-tanks',
     number: '03',
-    title: 'Siber Kanat',
-    genre: 'Refleks & Uçuş · Sonsuz Akış',
-    desc: 'Ritmik kanat çırparak siber lazer sütunlarının arasından süzülün.',
-    icon: Sparkles,
+    title: 'Siber Tanklar (Online 1v1 Arena)',
+    genre: 'Gerçek Zamanlı Tank Savaşı · Seken Lazerler',
+    desc: 'Büyüleyici neon arenada 60 FPS lazer tank düellosu! Duvarlardan seken lazerler, enerji kalkanları, hızlı eşleşme ve akıllı AI bot.',
+    icon: Crosshair,
   },
 ];
 
@@ -52,17 +53,17 @@ export default function App() {
       const gdVals = Object.values(gd).map(Number).filter((n) => !isNaN(n));
       const gdMax = gdVals.length > 0 ? Math.max(...gdVals) : 0;
       const conquest = Number(localStorage.getItem('conquest_best') || 0);
-      const flap = Number(localStorage.getItem('flappy_best') || 0);
+      const tanks = Number(localStorage.getItem('tanks_best') || 0);
       return {
         'geometry-dash': gdMax,
         'hexa-conquest': conquest,
-        'cyber-flap': flap,
+        'cyber-tanks': tanks,
       };
     } catch {
       return {
         'geometry-dash': 0,
         'hexa-conquest': 0,
-        'cyber-flap': 0,
+        'cyber-tanks': 0,
       };
     }
   });
@@ -220,8 +221,8 @@ export default function App() {
                   <span className="font-mono-num font-semibold text-sky-400">{records['hexa-conquest']} Puan</span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-400">Siber Kanat</span>
-                  <span className="font-mono-num font-semibold text-emerald-400">{records['cyber-flap']} Puan</span>
+                  <span className="text-slate-400">Siber Tanklar (Online)</span>
+                  <span className="font-mono-num font-semibold text-emerald-400">{records['cyber-tanks']} Puan</span>
                 </div>
               </div>
             </div>
@@ -264,11 +265,7 @@ export default function App() {
               </button>
 
               <div className="text-xs text-slate-400 hidden sm:block">
-                {activeGame === 'hexa-conquest' ? (
-                  <span className="text-emerald-400 font-medium">Canlı Çok Oyunculu</span>
-                ) : (
-                  <>Duraklat: <span className="font-mono-num text-slate-200">ESC</span></>
-                )}
+                <span className="text-emerald-400 font-medium">Canlı Çok Oyunculu & Online</span>
               </div>
             </div>
           </div>
@@ -277,37 +274,74 @@ export default function App() {
           <div className="flex-1">
             {activeGame === 'geometry-dash' && <GeometryDashGame onScoreUpdate={handleScoreUpdate} />}
             {activeGame === 'hexa-conquest' && <HexaConquestOnlineGame onScoreUpdate={handleScoreUpdate} />}
-            {activeGame === 'cyber-flap' && <CyberFlapGame onScoreUpdate={handleScoreUpdate} />}
+            {activeGame === 'cyber-tanks' && <CyberTanksOnlineGame onScoreUpdate={handleScoreUpdate} />}
           </div>
         </main>
 
-        {/* Right Sidebar: Reklam Panosu (Boş Bırakılmış - Kullanıcı Sonradan Ekleyecek) */}
+        {/* Right Sidebar: Alperen Oyun Sponsorlu Reklam Panosu */}
         {!isFullscreen && (
-          <aside className="w-full xl:w-72 shrink-0 flex flex-col bg-[#111827] border border-white/10 rounded-xl p-4 self-start shadow-lg">
+          <aside className="w-full xl:w-72 shrink-0 flex flex-col bg-[#111827] border border-white/10 rounded-xl p-4 self-start shadow-xl">
             <div className="flex items-center justify-between pb-3 mb-3 border-b border-white/10">
               <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
-                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">Reklam Panosu</h3>
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">Sponsorlu Reklam</h3>
               </div>
-              <span className="text-[10px] text-slate-500 font-mono">160x600 / 300x600</span>
+              <span className="text-[10px] text-slate-400 bg-slate-800/80 px-2 py-0.5 rounded border border-white/5 font-mono">
+                ÖNE ÇIKAN
+              </span>
             </div>
 
-            {/* ========================================================================= */}
-            {/* REKLAM KODU ALANI: KULLANICI BURAYA KENDİ REKLAM (ADSENSE / BANNER) KODUNU EKLEYEBİLİR */}
-            {/* ========================================================================= */}
-            <div
-              id="ad-banner-slot"
-              className="w-full min-h-[520px] xl:min-h-[620px] rounded-lg border-2 border-dashed border-white/10 bg-slate-900/40 flex flex-col items-center justify-center p-6 text-center text-slate-400"
+            {/* Reklam Alanı: Alperen Oyun Portal Reklamı */}
+            <a
+              href="https://alperen-oyun-mpvi.vercel.app"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="group block relative overflow-hidden rounded-xl border border-sky-500/30 hover:border-sky-400/80 bg-gradient-to-b from-slate-900 to-[#0F172A] shadow-xl hover:shadow-sky-500/20 transition-all duration-300 cursor-pointer"
+              title="Alperen Oyun Sitesine Git - alperen-oyun-mpvi.vercel.app"
             >
-              {/* REKLAM KODU BURAYA GELECEK - İÇİ BOŞ BIRAKILDI */}
-              <div className="p-3 rounded-full bg-slate-800/80 border border-white/10 mb-3 text-slate-400">
-                <Sparkles className="w-5 h-5 text-blue-400" />
+              {/* Reklam Afiş Görseli */}
+              <div className="relative w-full aspect-[2/3] overflow-hidden bg-slate-950">
+                <img
+                  src={alperenAdImg}
+                  alt="Alperen Oyun - alperen-oyun-mpvi.vercel.app"
+                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                  loading="lazy"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-[#0B0F17] via-transparent to-transparent opacity-80" />
+                
+                {/* Floating Badge */}
+                <div className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded-full bg-blue-600/90 backdrop-blur-md text-[10px] font-bold text-white border border-blue-400/50 shadow-md">
+                  CANLI OYUNLAR
+                </div>
               </div>
-              <p className="text-xs font-semibold text-slate-300 mb-1">Reklam Alanı</p>
-              <p className="text-[11px] text-slate-500 max-w-[200px] leading-relaxed">
-                Bu pano boş bırakılmıştır. Dilediğiniz zaman kendi reklam kodunuzu veya afişinizi buraya yerleştirebilirsiniz.
-              </p>
-            </div>
+
+              {/* Alt Bilgi & Tıklama Alanı */}
+              <div className="p-3.5 flex flex-col gap-2">
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-bold text-sm text-white group-hover:text-sky-300 transition-colors">
+                      Alperen Oyun
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-medium">
+                      Doğrulanmış
+                    </span>
+                  </div>
+                  <p className="text-[11px] font-mono text-sky-400 truncate mt-0.5">
+                    alperen-oyun-mpvi.vercel.app
+                  </p>
+                </div>
+
+                <p className="text-[11px] text-slate-400 line-clamp-2 leading-relaxed">
+                  Yüzlerce ücretsiz web oyunu, aksiyon ve refleks maceraları tek tıkla tarayıcınızda!
+                </p>
+
+                {/* Buton */}
+                <div className="mt-1 flex items-center justify-center gap-1.5 w-full py-2 px-3 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 group-hover:from-blue-500 group-hover:to-indigo-500 text-white text-xs font-bold shadow-md shadow-blue-600/25 transition-all">
+                  <span>Hemen Ziyaret Et</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </div>
+              </div>
+            </a>
           </aside>
         )}
       </div>

@@ -17,11 +17,32 @@ import {
   Zap,
   Gauge,
   Trophy,
+  Sparkles,
+  Palette,
+  Globe,
+  Home,
+  Crown,
+  Volume2,
+  VolumeX,
+  HelpCircle,
+  Star,
+  Award,
+  X,
 } from 'lucide-react';
 import { sound } from '../utils/sound';
 import { GD_LEVELS, LevelConfig, Obstacle } from '../utils/levels';
+import {
+  PlayerCosmetics,
+  loadSavedCosmetics,
+  saveCosmetics,
+  drawCubeSkin,
+  drawShipSkin,
+  drawWaveSkin,
+} from '../utils/cosmetics';
+import { GDGarageModal } from './GDGarageModal';
+import { GDOnlineLobby, OnlineOpponent } from './GDOnlineLobby';
 
-type GameModeOption = 'SOLO' | 'DUAL';
+type ActiveView = 'MAIN_MENU' | 'SOLO' | 'LOCAL_DUAL' | 'ONLINE_LOBBY' | 'ONLINE_GAME' | 'GARAGE';
 type GameState = 'TITLE_MENU' | 'COUNTDOWN' | 'PLAYING' | 'PAUSED' | 'GAME_OVER' | 'ROUND_SUMMARY';
 type VehicleMode = 'CUBE' | 'SHIP' | 'WAVE';
 type SpeedSetting = 1 | 2 | 3;
@@ -34,6 +55,7 @@ interface Particle {
   size: number;
   color: string;
   alpha: number;
+  type?: string;
 }
 
 const CANVAS_WIDTH = 960;
@@ -61,7 +83,7 @@ const BASE_SPEEDS: Record<SpeedSetting, number> = {
 };
 
 interface PlayerRuntime {
-  playerY: number; // local track coordinate [0, trackHeight]
+  playerY: number;
   vy: number;
   rotation: number;
   isGrounded: boolean;
@@ -70,13 +92,23 @@ interface PlayerRuntime {
   mode: VehicleMode;
   lives: number;
   respawnInvulnerable: number;
-  trail: Array<{ x: number; y: number; rot: number; color: string }>;
+  trail: Array<{ x: number; y: number; rot: number; color: string; tick: number }>;
 }
 
 export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number) => void }> = ({ onScoreUpdate }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [gamePlayMode, setGamePlayMode] = useState<GameModeOption>('SOLO');
+
+  // App / View Navigation
+  const [activeView, setActiveView] = useState<ActiveView>('MAIN_MENU');
   const [gameState, setGameState] = useState<GameState>('TITLE_MENU');
+
+  // Cosmetics & Player Profile
+  const [cosmetics, setCosmetics] = useState<PlayerCosmetics>(loadSavedCosmetics);
+  const [playerName, setPlayerName] = useState<string>(() => {
+    return localStorage.getItem('gd_player_name_v1') || 'Koşucu ' + Math.floor(100 + Math.random() * 900);
+  });
+
+  // Game configuration
   const [countdownNum, setCountdownNum] = useState<number>(3);
   const [levelIdx, setLevelIdx] = useState<number>(0);
   const [progressPct, setProgressPct] = useState<number>(0);
@@ -90,6 +122,16 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
   const [p1Lives, setP1Lives] = useState<number>(INITIAL_LIVES);
   const [p2Lives, setP2Lives] = useState<number>(INITIAL_LIVES);
   const [winner, setWinner] = useState<'P1' | 'P2' | 'DRAW' | null>(null);
+
+  // Online Multiplayer State
+  const [onlineRoomCode, setOnlineRoomCode] = useState<string>('');
+  const [myOnlineSlot, setMyOnlineSlot] = useState<'P1' | 'P2'>('P1');
+  const [onlineOpponent, setOnlineOpponent] = useState<OnlineOpponent | null>(null);
+  const onlineWsRef = useRef<WebSocket | null>(null);
+
+  // Modals
+  const [showLevelModal, setShowLevelModal] = useState<boolean>(false);
+  const [showHelpModal, setShowHelpModal] = useState<boolean>(false);
 
   const levels = GD_LEVELS;
   const currentLevel = levels[levelIdx] || levels[0];
@@ -106,7 +148,6 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
     checkpointY: 0,
     checkpointMode: 'CUBE' as VehicleMode,
     currentSpeedMult: 1 as SpeedSetting,
-    countdownTimer: 0,
     // Solo Player
     solo: {
       playerY: SOLO_GROUND_Y - SOLO_PLAYER_SIZE,
@@ -120,7 +161,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
       respawnInvulnerable: 0,
       trail: [],
     } as PlayerRuntime,
-    // Dual Players
+    // Dual / Online Players
     p1: {
       playerY: DUAL_GROUND_Y - DUAL_PLAYER_SIZE,
       vy: 0,
@@ -147,37 +188,34 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
     } as PlayerRuntime,
   });
 
-  // Endless pattern generator: Generates readable, fair, exciting obstacle sequences in track-local coords
+  // Endless pattern generator for Dual & Online
   const generateEndlessSegment = useCallback((startX: number): Obstacle[] => {
     const obs: Obstacle[] = [];
     let x = startX;
-    const GY = DUAL_GROUND_Y; // 196
-    const CY = DUAL_CEILING_Y; // 24
-    const playH = GY - CY; // 172
+    const GY = DUAL_GROUND_Y;
+    const CY = DUAL_CEILING_Y;
+    const playH = GY - CY;
 
     const modes: VehicleMode[] = ['CUBE', 'SHIP', 'WAVE'];
 
     for (let seg = 0; seg < 3; seg++) {
       const mode = modes[Math.floor(Math.random() * modes.length)];
 
-      // 1. Optional speed portal at start of segment
       const speedChance = Math.random();
-      if (speedChance > 0.5) {
-        const nextSpeed: SpeedSetting = speedChance > 0.75 ? 3 : 2;
+      if (speedChance > 0.55) {
+        const nextSpeed: SpeedSetting = speedChance > 0.8 ? 3 : 2;
         const spType = nextSpeed === 3 ? 'SPEED_3X' : 'SPEED_2X';
         obs.push({ x, y: CY, w: 32, h: playH, type: spType });
-        x += 260; // Generous clear space after speed portal
-      } else if (speedChance < 0.25) {
+        x += 260;
+      } else if (speedChance < 0.2) {
         obs.push({ x, y: CY, w: 32, h: playH, type: 'SPEED_1X' });
         x += 260;
       }
 
-      // 2. Mode Portal
       if (mode === 'SHIP') {
         obs.push({ x, y: CY, w: 36, h: playH, type: 'PORTAL_ROCKET' });
-        x += 350; // 350px clear runway to stabilize rocket flight!
+        x += 350;
 
-        // Smooth flight course with wide 110px+ openings
         obs.push({ x: x + 100, y: CY, w: 70, h: 50, type: 'BLOCK' });
         obs.push({ x: x + 380, y: GY - 55, w: 75, h: 55, type: 'BLOCK' });
         obs.push({ x: x + 680, y: CY, w: 70, h: 50, type: 'BLOCK' });
@@ -185,18 +223,16 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
         x += 1250;
       } else if (mode === 'WAVE') {
         obs.push({ x, y: CY, w: 36, h: playH, type: 'PORTAL_WAVE' });
-        x += 350; // 350px clear runway to prepare for wave!
+        x += 350;
 
-        // Smooth 45-degree zig-zag safe corridor
         obs.push({ x: x + 120, y: CY, w: 75, h: 48, type: 'BLOCK' });
         obs.push({ x: x + 380, y: GY - 52, w: 75, h: 52, type: 'BLOCK' });
         obs.push({ x: x + 640, y: CY, w: 75, h: 48, type: 'BLOCK' });
         obs.push({ x: x + 900, y: GY - 52, w: 75, h: 52, type: 'BLOCK' });
         x += 1200;
       } else {
-        // CUBE rhythm parkour
         obs.push({ x, y: CY, w: 36, h: playH, type: 'PORTAL_CUBE' });
-        x += 300; // 300px runway
+        x += 300;
 
         obs.push({ x: x + 100, y: GY - 28, w: 28, h: 28, type: 'SPIKE' });
         obs.push({ x: x + 340, y: GY - 12, w: 38, h: 12, type: 'PAD' });
@@ -223,7 +259,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
       eng.screenShakeP2 = 0;
       eng.currentSpeedMult = speedMultiplier;
 
-      if (gamePlayMode === 'SOLO') {
+      if (activeView === 'SOLO') {
         if (fromCheckpoint && practiceMode && eng.checkpointX > 0) {
           eng.worldX = eng.checkpointX;
           eng.solo.playerY = eng.checkpointY;
@@ -244,7 +280,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
         eng.obstacles = lvl.obstacles.map((o) => ({ ...o, triggered: false }));
         setProgressPct(Math.min(100, Math.floor((eng.worldX / lvl.length) * 100)));
       } else {
-        // DUAL 2-PLAYER VS
+        // LOCAL_DUAL or ONLINE_GAME
         eng.worldX = 0;
         eng.obstacles = generateEndlessSegment(550);
 
@@ -280,13 +316,12 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
         setEndlessDistance(0);
       }
     },
-    [gamePlayMode, levelIdx, levels, practiceMode, speedMultiplier, generateEndlessSegment]
+    [activeView, levelIdx, levels, practiceMode, speedMultiplier, generateEndlessSegment]
   );
 
   const startPlay = () => {
     initGame(false);
-    if (gamePlayMode === 'DUAL') {
-      // 3-2-1 Countdown for fair synchronized start
+    if (activeView === 'LOCAL_DUAL' || activeView === 'ONLINE_GAME') {
       setGameState('COUNTDOWN');
       setCountdownNum(3);
       sound.playBeat(1);
@@ -310,7 +345,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
   const restartPlay = useCallback(() => {
     setAttempts((a) => a + 1);
     initGame(practiceMode && engineRef.current.checkpointX > 0);
-    if (gamePlayMode === 'DUAL') {
+    if (activeView === 'LOCAL_DUAL') {
       setGameState('COUNTDOWN');
       setCountdownNum(3);
       sound.playBeat(1);
@@ -329,7 +364,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
     } else {
       setGameState('PLAYING');
     }
-  }, [initGame, practiceMode, gamePlayMode]);
+  }, [initGame, practiceMode, activeView]);
 
   // Jump controls
   const triggerSoloJump = useCallback(() => {
@@ -359,10 +394,61 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
     engineRef.current.p2.holdingJump = false;
   }, []);
 
+  // Online Match Start Hook from Lobby
+  const handleStartOnlineMatch = (
+    ws: WebSocket,
+    roomCode: string,
+    mySlot: 'P1' | 'P2',
+    opponent: OnlineOpponent | null,
+    seed: number
+  ) => {
+    onlineWsRef.current = ws;
+    setOnlineRoomCode(roomCode);
+    setMyOnlineSlot(mySlot);
+    setOnlineOpponent(opponent);
+    setActiveView('ONLINE_GAME');
+    initGame(false);
+    setGameState('PLAYING');
+    sound.playPad();
+
+    // Listen to live opponent position packets
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'GD_OPPONENT_POS') {
+          const oppKey = mySlot === 'P1' ? 'p2' : 'p1';
+          const oppState = engineRef.current[oppKey];
+          oppState.playerY = msg.playerY;
+          oppState.vy = msg.vy;
+          oppState.rotation = msg.rotation;
+          oppState.mode = msg.mode;
+          oppState.lives = msg.lives;
+          oppState.respawnInvulnerable = msg.isInvulnerable ? 60 : 0;
+          if (mySlot === 'P1') setP2Lives(msg.lives);
+          else setP1Lives(msg.lives);
+        } else if (msg.type === 'GD_ROOM_UPDATE') {
+          if (msg.status === 'FINISHED' && msg.winner) {
+            setWinner(msg.winner);
+            setGameState('GAME_OVER');
+            sound.playVictory();
+          } else if (msg.status === 'COUNTDOWN') {
+            initGame(false);
+            setGameState('COUNTDOWN');
+            setCountdownNum(msg.countdown || 3);
+          } else if (msg.status === 'RACING') {
+            setGameState('PLAYING');
+          }
+        }
+      } catch {
+        // ignore
+      }
+    };
+  };
+
   // Keyboard events
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (gamePlayMode === 'SOLO') {
+      if (activeView === 'SOLO') {
         if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
           e.preventDefault();
           if (gameState === 'PLAYING') triggerSoloJump();
@@ -373,8 +459,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
           engineRef.current.checkpointMode = engineRef.current.solo.mode;
           sound.playScore();
         }
-      } else {
-        // DUAL VS CONTROLS:
+      } else if (activeView === 'LOCAL_DUAL') {
         // P1: W, Space, E, A
         if (e.code === 'KeyW' || e.code === 'Space' || e.code === 'KeyE' || e.code === 'KeyA') {
           e.preventDefault();
@@ -394,6 +479,15 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
           if (gameState === 'PLAYING') triggerP2Jump();
           else if (gameState === 'GAME_OVER') restartPlay();
         }
+      } else if (activeView === 'ONLINE_GAME') {
+        // Online: Press space or W or Up to jump
+        if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+          e.preventDefault();
+          if (gameState === 'PLAYING') {
+            if (myOnlineSlot === 'P1') triggerP1Jump();
+            else triggerP2Jump();
+          }
+        }
       }
 
       if (e.code === 'Escape' && (gameState === 'PLAYING' || gameState === 'PAUSED')) {
@@ -402,9 +496,9 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
-      if (gamePlayMode === 'SOLO') {
+      if (activeView === 'SOLO') {
         if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') releaseSoloJump();
-      } else {
+      } else if (activeView === 'LOCAL_DUAL') {
         if (e.code === 'KeyW' || e.code === 'Space' || e.code === 'KeyE' || e.code === 'KeyA') releaseP1Jump();
         if (
           e.code === 'ArrowUp' ||
@@ -416,6 +510,11 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
         ) {
           releaseP2Jump();
         }
+      } else if (activeView === 'ONLINE_GAME') {
+        if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+          if (myOnlineSlot === 'P1') releaseP1Jump();
+          else releaseP2Jump();
+        }
       }
     };
 
@@ -425,29 +524,45 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, [gamePlayMode, gameState, practiceMode, restartPlay, triggerSoloJump, releaseSoloJump, triggerP1Jump, releaseP1Jump, triggerP2Jump, releaseP2Jump]);
+  }, [
+    activeView,
+    gameState,
+    practiceMode,
+    myOnlineSlot,
+    restartPlay,
+    triggerSoloJump,
+    releaseSoloJump,
+    triggerP1Jump,
+    releaseP1Jump,
+    triggerP2Jump,
+    releaseP2Jump,
+  ]);
 
   // Main 60 FPS Game Loop
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || activeView === 'MAIN_MENU' || activeView === 'ONLINE_LOBBY' || activeView === 'GARAGE') return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
     let animId: number;
 
-    const spawnExplosion = (x: number, y: number, color: string) => {
-      for (let i = 0; i < 22; i++) {
-        const ang = (Math.PI * 2 * i) / 22 + Math.random() * 0.4;
-        const spd = 2.0 + Math.random() * 4.5;
+    const spawnExplosion = (x: number, y: number, color: string, effectType?: string) => {
+      const type = effectType || cosmetics.deathEffect || 'death-classic';
+      const count = type === 'death-nova' ? 28 : type === 'death-hearts' ? 16 : 22;
+
+      for (let i = 0; i < count; i++) {
+        const ang = (Math.PI * 2 * i) / count + Math.random() * 0.4;
+        const spd = type === 'death-nova' ? 4.5 : 2.0 + Math.random() * 4.5;
         engineRef.current.particles.push({
           x,
           y,
           vx: Math.cos(ang) * spd,
           vy: Math.sin(ang) * spd,
-          size: 3.5 + Math.random() * 3.5,
+          size: type === 'death-pixel' ? 3 : 4 + Math.random() * 3,
           color,
           alpha: 1,
+          type,
         });
       }
     };
@@ -457,7 +572,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
       const lvl = levels[levelIdx] || levels[0];
 
       const currentSpeed =
-        gamePlayMode === 'SOLO'
+        activeView === 'SOLO'
           ? lvl.speed
           : BASE_SPEEDS[eng.currentSpeedMult] || BASE_SPEEDS[1];
 
@@ -471,8 +586,8 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
         if (eng.screenShakeP1 > 0) eng.screenShakeP1 = Math.max(0, eng.screenShakeP1 * 0.88 - 0.2);
         if (eng.screenShakeP2 > 0) eng.screenShakeP2 = Math.max(0, eng.screenShakeP2 * 0.88 - 0.2);
 
-        // Endless dynamic chunk generation for DUAL mode
-        if (gamePlayMode === 'DUAL') {
+        // Endless dynamic chunk generation
+        if (activeView === 'LOCAL_DUAL' || activeView === 'ONLINE_GAME') {
           const dist = Math.floor(eng.worldX / 10);
           setEndlessDistance(dist);
 
@@ -483,6 +598,23 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
           }
           if (eng.obstacles.length > 50 && eng.obstacles[0].x - eng.worldX < -500) {
             eng.obstacles.shift();
+          }
+
+          // Online WebSocket Sync broadcast (~30 times/sec)
+          if (activeView === 'ONLINE_GAME' && onlineWsRef.current?.readyState === WebSocket.OPEN && eng.beatTimer % 2 === 0) {
+            const myRun = myOnlineSlot === 'P1' ? eng.p1 : eng.p2;
+            onlineWsRef.current.send(
+              JSON.stringify({
+                type: 'GD_SYNC_POS',
+                worldX: eng.worldX,
+                playerY: myRun.playerY,
+                vy: myRun.vy,
+                rotation: myRun.rotation,
+                mode: myRun.mode,
+                lives: myRun.lives,
+                isInvulnerable: myRun.respawnInvulnerable > 0,
+              })
+            );
           }
         } else {
           const pct = Math.min(100, Math.floor((eng.worldX / lvl.length) * 100));
@@ -502,7 +634,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
           name: 'SOLO' | 'P1' | 'P2';
           color: string;
         }> =
-          gamePlayMode === 'SOLO'
+          activeView === 'SOLO'
             ? [
                 {
                   p: eng.solo,
@@ -512,7 +644,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
                   ceilingY: SOLO_CEILING_Y,
                   pSize: SOLO_PLAYER_SIZE,
                   name: 'SOLO',
-                  color: '#3B82F6',
+                  color: cosmetics.primaryColor,
                 },
               ]
             : [
@@ -524,7 +656,10 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
                   ceilingY: DUAL_CEILING_Y,
                   pSize: DUAL_PLAYER_SIZE,
                   name: 'P1',
-                  color: '#3B82F6',
+                  color:
+                    activeView === 'ONLINE_GAME' && myOnlineSlot === 'P2' && onlineOpponent
+                      ? onlineOpponent.cosmetics?.primaryColor || '#3B82F6'
+                      : cosmetics.primaryColor,
                 },
                 {
                   p: eng.p2,
@@ -534,18 +669,29 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
                   ceilingY: DUAL_CEILING_Y,
                   pSize: DUAL_PLAYER_SIZE,
                   name: 'P2',
-                  color: '#EF4444',
+                  color:
+                    activeView === 'ONLINE_GAME' && myOnlineSlot === 'P1' && onlineOpponent
+                      ? onlineOpponent.cosmetics?.primaryColor || '#EF4444'
+                      : activeView === 'ONLINE_GAME'
+                      ? cosmetics.primaryColor
+                      : '#EF4444',
                 },
               ];
 
         for (const { p, trackYOffset, groundY, ceilingY, pSize, name, color } of activeTracks) {
+          // If Online, only calculate local physics for your own slot!
+          if (activeView === 'ONLINE_GAME') {
+            const isMe = (myOnlineSlot === 'P1' && name === 'P1') || (myOnlineSlot === 'P2' && name === 'P2');
+            if (!isMe) continue;
+          }
+
           if (p.jumpBufferTimer > 0) p.jumpBufferTimer--;
           if (p.respawnInvulnerable > 0) p.respawnInvulnerable--;
 
           // --- VEHICLE MODES ---
           if (p.mode === 'CUBE') {
-            if (p.holdingJump && p.isGrounded) {
-              p.vy = gamePlayMode === 'SOLO' ? -12.4 : -11.6;
+            if ((p.holdingJump || p.jumpBufferTimer > 0) && p.isGrounded) {
+              p.vy = activeView === 'SOLO' ? -12.4 : -11.6;
               p.isGrounded = false;
               p.jumpBufferTimer = 0;
               sound.playJump();
@@ -564,7 +710,6 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
               p.isGrounded = false;
             }
           } else if (p.mode === 'SHIP') {
-            // Smooth, responsive rocket flight
             if (p.holdingJump) p.vy -= 0.68;
             else p.vy += 0.48;
 
@@ -581,7 +726,6 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
               p.vy = 0;
             }
           } else if (p.mode === 'WAVE') {
-            // Snappy 45-degree angle wave
             const waveSpeed = 4.8;
             if (p.holdingJump) {
               p.vy = -waveSpeed;
@@ -609,6 +753,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
               y: p.playerY,
               rot: p.rotation,
               color,
+              tick: eng.beatTimer,
             });
             if (p.trail.length > 8) p.trail.shift();
           }
@@ -627,39 +772,47 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
 
             const obsLocalY = obs.y;
 
-            // Spikes
+            // Spikes with fair triangular sub-spike collision
             if (obs.type === 'SPIKE' || obs.type === 'DOUBLE_SPIKE' || obs.type === 'TRIPLE_SPIKE') {
               if (p.respawnInvulnerable <= 0) {
-                const sHitbox = {
-                  left: sx + 6,
-                  right: sx + obs.w - 6,
-                  top: obsLocalY + 7,
-                  bottom: obsLocalY + obs.h - 1,
-                };
-                if (
-                  pRight > sHitbox.left &&
-                  pLeft < sHitbox.right &&
-                  pBottom > sHitbox.top &&
-                  pTop < sHitbox.bottom
-                ) {
+                const subCount = obs.type === 'TRIPLE_SPIKE' ? 3 : obs.type === 'DOUBLE_SPIKE' ? 2 : 1;
+                const singleSpikeW = obs.w / subCount;
+                let hit = false;
+                for (let sIdx = 0; sIdx < subCount; sIdx++) {
+                  const sLeft = sx + sIdx * singleSpikeW;
+                  const sCenter = sLeft + singleSpikeW / 2;
+                  if (pBottom > obsLocalY + 5 && pTop < obsLocalY + obs.h - 1) {
+                    const depthFrac = Math.max(0.18, Math.min(1, (pBottom - obsLocalY) / obs.h));
+                    const effectiveHalfW = (singleSpikeW * 0.42) * depthFrac;
+                    if (pRight > sCenter - effectiveHalfW && pLeft < sCenter + effectiveHalfW) {
+                      hit = true;
+                      break;
+                    }
+                  }
+                }
+
+                if (hit) {
                   sound.playCrash();
                   if (name === 'P1') eng.screenShakeP1 = 12;
                   else eng.screenShakeP2 = 12;
 
-                  spawnExplosion(px + pSize / 2, py + trackYOffset + pSize / 2, color);
+                  spawnExplosion(px + pSize / 2, py + trackYOffset + pSize / 2, color, cosmetics.deathEffect);
 
-                  if (gamePlayMode === 'SOLO') {
+                  if (activeView === 'SOLO') {
                     setGameState('GAME_OVER');
                     break;
                   } else {
                     p.lives -= 1;
-                    // GENEROUS GHOST SHIELD: 90 frames (~1.5 seconds) of collision immunity
                     p.respawnInvulnerable = 90;
                     p.playerY = p.mode === 'CUBE' ? groundY - pSize : (groundY + ceilingY) / 2;
                     p.vy = 0;
 
                     if (name === 'P1') setP1Lives(p.lives);
                     if (name === 'P2') setP2Lives(p.lives);
+
+                    if (activeView === 'ONLINE_GAME' && onlineWsRef.current?.readyState === WebSocket.OPEN) {
+                      onlineWsRef.current.send(JSON.stringify({ type: 'GD_CRASH', lives: p.lives }));
+                    }
 
                     if (p.lives <= 0) {
                       const finalWinner = name === 'P1' ? 'P2' : 'P1';
@@ -694,9 +847,9 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
                   if (name === 'P1') eng.screenShakeP1 = 12;
                   else eng.screenShakeP2 = 12;
 
-                  spawnExplosion(px + pSize / 2, py + trackYOffset + pSize / 2, color);
+                  spawnExplosion(px + pSize / 2, py + trackYOffset + pSize / 2, color, cosmetics.deathEffect);
 
-                  if (gamePlayMode === 'SOLO') {
+                  if (activeView === 'SOLO') {
                     setGameState('GAME_OVER');
                     break;
                   } else {
@@ -707,6 +860,10 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
 
                     if (name === 'P1') setP1Lives(p.lives);
                     if (name === 'P2') setP2Lives(p.lives);
+
+                    if (activeView === 'ONLINE_GAME' && onlineWsRef.current?.readyState === WebSocket.OPEN) {
+                      onlineWsRef.current.send(JSON.stringify({ type: 'GD_CRASH', lives: p.lives }));
+                    }
 
                     if (p.lives <= 0) {
                       const finalWinner = name === 'P1' ? 'P2' : 'P1';
@@ -722,7 +879,8 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
             }
             // Jump Pad
             else if (obs.type === 'PAD') {
-              if (pRight > sx && pLeft < sx + obs.w && pBottom >= obsLocalY && pTop <= obsLocalY + obs.h) {
+              if (pRight > sx && pLeft < sx + obs.w && pBottom >= obsLocalY && pTop <= obsLocalY + obs.h && !obs.triggered) {
+                obs.triggered = true;
                 p.vy = -16.0;
                 p.isGrounded = false;
                 sound.playPad();
@@ -736,15 +894,16 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
               const dist = Math.hypot(px + pSize / 2 - orbCenterX, py + pSize / 2 - orbCenterY);
               const isClicking = p.jumpBufferTimer > 0 || p.holdingJump;
 
-              if (dist < 48 && isClicking) {
-                p.vy = -10.2;
+              if (dist < 52 && isClicking && !obs.triggered) {
+                obs.triggered = true;
+                p.vy = activeView === 'SOLO' ? -10.8 : -10.2;
                 p.jumpBufferTimer = 0;
                 p.isGrounded = false;
                 sound.playOrb();
                 spawnExplosion(orbCenterX, orbCenterY + trackYOffset, color);
               }
             }
-            // Vehicle Portals
+            // Portals
             else if (obs.type === 'PORTAL_ROCKET') {
               if (pRight > sx && pLeft < sx + obs.w && p.mode !== 'SHIP') {
                 p.mode = 'SHIP';
@@ -778,7 +937,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
               }
             }
             // Finish line (Solo)
-            else if (obs.type === 'FINISH' && gamePlayMode === 'SOLO') {
+            else if (obs.type === 'FINISH' && activeView === 'SOLO') {
               if (pRight > sx) {
                 sound.playVictory();
                 onScoreUpdate('geometry-dash', 100);
@@ -795,8 +954,8 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
       // =====================================================================
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      if (gamePlayMode === 'SOLO') {
-        // --- SOLO FULL-SCREEN ---
+      if (activeView === 'SOLO') {
+        // --- SOLO FULL-SCREEN TRACK ---
         ctx.save();
         const bgGrad = ctx.createLinearGradient(0, 0, 0, canvas.height);
         bgGrad.addColorStop(0, '#060911');
@@ -830,7 +989,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
         // Floor
         ctx.fillStyle = '#0F172A';
         ctx.fillRect(0, SOLO_GROUND_Y, canvas.width, canvas.height - SOLO_GROUND_Y);
-        ctx.strokeStyle = '#3B82F6';
+        ctx.strokeStyle = cosmetics.primaryColor;
         ctx.lineWidth = 3;
         ctx.beginPath();
         ctx.moveTo(0, SOLO_GROUND_Y);
@@ -846,20 +1005,6 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
           ctx.moveTo(fx, SOLO_GROUND_Y + 10);
           ctx.lineTo(fx + 22, SOLO_GROUND_Y + 32);
           ctx.stroke();
-        }
-
-        // Checkpoint in practice mode
-        if (practiceMode && eng.checkpointX > 0) {
-          const cx = eng.checkpointX - eng.worldX;
-          if (cx > -30 && cx < canvas.width + 30) {
-            ctx.fillStyle = '#10B981';
-            ctx.beginPath();
-            ctx.arc(cx + 18, eng.checkpointY + 18, 9, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.strokeStyle = '#FFFFFF';
-            ctx.lineWidth = 2;
-            ctx.stroke();
-          }
         }
 
         // Obstacles
@@ -896,7 +1041,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
             }
           } else if (obs.type === 'BLOCK') {
             ctx.fillStyle = '#1E293B';
-            ctx.strokeStyle = '#3B82F6';
+            ctx.strokeStyle = cosmetics.primaryColor;
             ctx.lineWidth = 2;
             ctx.fillRect(sx, obs.y, obs.w, obs.h);
             ctx.strokeRect(sx, obs.y, obs.w, obs.h);
@@ -912,13 +1057,9 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
             ctx.strokeStyle = '#FACC15';
             ctx.lineWidth = 3.5;
             ctx.beginPath();
-            ctx.arc(sx + obs.w / 2, obs.y + obs.h / 2, 16, 0, Math.PI * 2);
+            ctx.arc(sx + obs.w / 2, obs.y + obs.h, 16, 0, Math.PI * 2);
             ctx.stroke();
             ctx.fillStyle = 'rgba(250, 204, 21, 0.45)';
-            ctx.fill();
-            ctx.fillStyle = '#FEF08A';
-            ctx.beginPath();
-            ctx.arc(sx + obs.w / 2, obs.y + obs.h / 2, 6, 0, Math.PI * 2);
             ctx.fill();
           } else if (obs.type === 'PORTAL_ROCKET' || obs.type === 'PORTAL_CUBE' || obs.type === 'PORTAL_WAVE') {
             const pCol =
@@ -935,20 +1076,14 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
             ctx.fillStyle = fGrad;
             ctx.fillRect(sx, obs.y, obs.w, obs.h);
           }
-
-          if (showHitboxes) {
-            ctx.strokeStyle = '#EF4444';
-            ctx.lineWidth = 1;
-            ctx.strokeRect(sx, obs.y, obs.w, obs.h);
-          }
         }
 
-        // Draw Solo Player
+        // Draw Player with Equipped Cosmetics
         if (gameState !== 'GAME_OVER') {
           const px = FIXED_PLAYER_SCREEN_X;
           const py = eng.solo.playerY;
 
-          // Trail
+          // Trail Rendering
           for (let i = 0; i < eng.solo.trail.length; i++) {
             const tr = eng.solo.trail[i];
             const trAlpha = ((i + 1) / (eng.solo.trail.length + 1)) * 0.35;
@@ -956,7 +1091,10 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
             ctx.globalAlpha = trAlpha;
             ctx.translate(tr.x + 18, tr.y + 18);
             ctx.rotate((tr.rot * Math.PI) / 180);
-            ctx.fillStyle = '#3B82F6';
+            ctx.fillStyle =
+              cosmetics.trailEffect === 'trail-rainbow'
+                ? `hsl(${(tr.tick * 10) % 360}, 90%, 60%)`
+                : cosmetics.primaryColor;
             ctx.fillRect(-18, -18, 36, 36);
             ctx.restore();
           }
@@ -966,28 +1104,11 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
           ctx.rotate((eng.solo.rotation * Math.PI) / 180);
 
           if (eng.solo.mode === 'CUBE') {
-            ctx.fillStyle = '#3B82F6';
-            ctx.fillRect(-18, -18, 36, 36);
-            ctx.strokeStyle = '#FFFFFF';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(-18, -18, 36, 36);
-
-            ctx.fillStyle = '#090D16';
-            ctx.fillRect(-10, -8, 6, 6);
-            ctx.fillRect(4, -8, 6, 6);
-            ctx.fillRect(-8, 4, 16, 4);
+            drawCubeSkin(ctx, cosmetics.cubeSkin, cosmetics.primaryColor, cosmetics.secondaryColor, 36);
+          } else if (eng.solo.mode === 'SHIP') {
+            drawShipSkin(ctx, cosmetics.shipSkin, cosmetics.primaryColor, cosmetics.secondaryColor, eng.solo.holdingJump);
           } else {
-            ctx.fillStyle = '#06B6D4';
-            ctx.beginPath();
-            ctx.moveTo(22, 0);
-            ctx.lineTo(-18, -18);
-            ctx.lineTo(-12, 0);
-            ctx.lineTo(-18, 18);
-            ctx.closePath();
-            ctx.fill();
-            ctx.strokeStyle = '#FFFFFF';
-            ctx.lineWidth = 2;
-            ctx.stroke();
+            drawWaveSkin(ctx, cosmetics.waveSkin, cosmetics.primaryColor, cosmetics.secondaryColor);
           }
           ctx.restore();
         }
@@ -995,35 +1116,91 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
         ctx.restore();
       } else {
         // =====================================================================
-        // --- 2-PLAYER REBUILT ARENA: INDEPENDENT ISOLATED DUAL TRACKS ---
+        // --- LOCAL DUAL & ONLINE ARENA (2 SPLIT TRACKS) ---
         // =====================================================================
         const tracks = [
           {
             trackIndex: 0,
             yOffset: 0,
-            label: '1. OYUNCU (MAVİ) · [W / BOŞLUK]',
-            color: '#3B82F6',
+            label:
+              activeView === 'ONLINE_GAME'
+                ? myOnlineSlot === 'P1'
+                  ? `SEN (${playerName}) · [W / BOŞLUK]`
+                  : `RAKİP (${onlineOpponent?.name || 'Oyuncu 1'})`
+                : '1. OYUNCU (MAVİ) · [W / BOŞLUK]',
+            color:
+              activeView === 'ONLINE_GAME' && myOnlineSlot === 'P2' && onlineOpponent
+                ? onlineOpponent.cosmetics?.primaryColor || '#3B82F6'
+                : cosmetics.primaryColor,
+            secColor:
+              activeView === 'ONLINE_GAME' && myOnlineSlot === 'P2' && onlineOpponent
+                ? onlineOpponent.cosmetics?.secondaryColor || '#FFFFFF'
+                : cosmetics.secondaryColor,
+            skin:
+              activeView === 'ONLINE_GAME' && myOnlineSlot === 'P2' && onlineOpponent
+                ? onlineOpponent.cosmetics?.cubeSkin || 'cube-classic'
+                : cosmetics.cubeSkin,
+            shipSkin:
+              activeView === 'ONLINE_GAME' && myOnlineSlot === 'P2' && onlineOpponent
+                ? onlineOpponent.cosmetics?.shipSkin || 'ship-classic'
+                : cosmetics.shipSkin,
+            waveSkin:
+              activeView === 'ONLINE_GAME' && myOnlineSlot === 'P2' && onlineOpponent
+                ? onlineOpponent.cosmetics?.waveSkin || 'wave-classic'
+                : cosmetics.waveSkin,
             p: eng.p1,
             shake: eng.screenShakeP1,
           },
           {
             trackIndex: 1,
             yOffset: DUAL_TRACK_HEIGHT,
-            label: '2. OYUNCU (KIRMIZI) · [YUKARI OK / ENTER / L]',
-            color: '#EF4444',
+            label:
+              activeView === 'ONLINE_GAME'
+                ? myOnlineSlot === 'P2'
+                  ? `SEN (${playerName}) · [W / BOŞLUK]`
+                  : `RAKİP (${onlineOpponent?.name || 'Oyuncu 2'})`
+                : '2. OYUNCU (KIRMIZI) · [YUKARI OK / ENTER / L]',
+            color:
+              activeView === 'ONLINE_GAME' && myOnlineSlot === 'P1' && onlineOpponent
+                ? onlineOpponent.cosmetics?.primaryColor || '#EF4444'
+                : activeView === 'ONLINE_GAME'
+                ? cosmetics.primaryColor
+                : '#EF4444',
+            secColor:
+              activeView === 'ONLINE_GAME' && myOnlineSlot === 'P1' && onlineOpponent
+                ? onlineOpponent.cosmetics?.secondaryColor || '#FFFFFF'
+                : activeView === 'ONLINE_GAME'
+                ? cosmetics.secondaryColor
+                : '#FEF08A',
+            skin:
+              activeView === 'ONLINE_GAME' && myOnlineSlot === 'P1' && onlineOpponent
+                ? onlineOpponent.cosmetics?.cubeSkin || 'cube-classic'
+                : activeView === 'ONLINE_GAME'
+                ? cosmetics.cubeSkin
+                : 'cube-ninja',
+            shipSkin:
+              activeView === 'ONLINE_GAME' && myOnlineSlot === 'P1' && onlineOpponent
+                ? onlineOpponent.cosmetics?.shipSkin || 'ship-classic'
+                : activeView === 'ONLINE_GAME'
+                ? cosmetics.shipSkin
+                : 'ship-stealth',
+            waveSkin:
+              activeView === 'ONLINE_GAME' && myOnlineSlot === 'P1' && onlineOpponent
+                ? onlineOpponent.cosmetics?.waveSkin || 'wave-classic'
+                : activeView === 'ONLINE_GAME'
+                ? cosmetics.waveSkin
+                : 'wave-shuriken',
             p: eng.p2,
             shake: eng.screenShakeP2,
           },
         ];
 
-        tracks.forEach(({ yOffset, label, color, p, shake }) => {
+        tracks.forEach(({ yOffset, label, color, secColor, skin, shipSkin, waveSkin, p, shake }) => {
           ctx.save();
-          // STRICT CLIPPING TO PREVENT ANY OVERFLOW/BLEEDING
           ctx.beginPath();
           ctx.rect(0, yOffset, canvas.width, DUAL_TRACK_HEIGHT);
           ctx.clip();
 
-          // Apply track-specific screen shake
           if (shake > 0) {
             const sx = (Math.random() - 0.5) * shake;
             const sy = (Math.random() - 0.5) * shake;
@@ -1079,7 +1256,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
             ctx.stroke();
           }
 
-          // Track HUD: Player & Mode
+          // Track HUD
           ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
           ctx.fillRect(10, yOffset + 5, 330, 22);
           ctx.strokeStyle = color;
@@ -1089,7 +1266,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
           ctx.font = 'bold 11px sans-serif';
           ctx.fillText(`${label} · [${p.mode}]`, 16, yOffset + 20);
 
-          // Speed Badge inside track
+          // Speed Badge
           const curSpd = eng.currentSpeedMult;
           const spColor = curSpd === 3 ? '#F43F5E' : curSpd === 2 ? '#F59E0B' : '#06B6D4';
           ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
@@ -1101,7 +1278,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
           ctx.font = 'bold 11px sans-serif';
           ctx.fillText(`⚡ ${curSpd}X HIZ`, canvas.width - 92, yOffset + 20);
 
-          // Shield indicator if player has respawn invulnerability
+          // Shield status
           if (p.respawnInvulnerable > 0) {
             const pct = Math.ceil((p.respawnInvulnerable / 90) * 100);
             ctx.fillStyle = 'rgba(16, 185, 129, 0.2)';
@@ -1208,12 +1385,6 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
               ctx.font = 'bold 9px sans-serif';
               ctx.fillText(spdNum, sx + 7, drawY + obs.h / 2 + 10);
             }
-
-            if (showHitboxes) {
-              ctx.strokeStyle = '#EF4444';
-              ctx.lineWidth = 1;
-              ctx.strokeRect(sx, drawY, obs.w, obs.h);
-            }
           }
 
           // Player Trails
@@ -1229,12 +1400,12 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
             ctx.restore();
           }
 
-          // Player Avatar
+          // Player Avatar with Cosmetics
           if (gameState !== 'GAME_OVER' || winner) {
             const px = FIXED_PLAYER_SCREEN_X;
             const py = p.playerY + yOffset;
 
-            // Shield Bubble Effect while invulnerable
+            // Shield Bubble while invulnerable
             if (p.respawnInvulnerable > 0) {
               ctx.save();
               ctx.strokeStyle = '#10B981';
@@ -1256,56 +1427,17 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
             }
 
             if (p.mode === 'CUBE') {
-              ctx.fillStyle = color;
-              ctx.fillRect(-14, -14, 28, 28);
-              ctx.strokeStyle = '#FFFFFF';
-              ctx.lineWidth = 2;
-              ctx.strokeRect(-14, -14, 28, 28);
-
-              ctx.fillStyle = '#090D16';
-              ctx.fillRect(-8, -6, 5, 5);
-              ctx.fillRect(3, -6, 5, 5);
-              ctx.fillRect(-6, 3, 12, 3);
+              drawCubeSkin(ctx, skin, color, secColor, 28);
             } else if (p.mode === 'SHIP') {
-              ctx.fillStyle = color;
-              ctx.beginPath();
-              ctx.moveTo(18, 0);
-              ctx.lineTo(-14, -13);
-              ctx.lineTo(-8, 0);
-              ctx.lineTo(-14, 13);
-              ctx.closePath();
-              ctx.fill();
-              ctx.strokeStyle = '#FFFFFF';
-              ctx.lineWidth = 2;
-              ctx.stroke();
-
-              if (p.holdingJump) {
-                ctx.fillStyle = '#F59E0B';
-                ctx.beginPath();
-                ctx.moveTo(-8, -4);
-                ctx.lineTo(-20, 0);
-                ctx.lineTo(-8, 4);
-                ctx.closePath();
-                ctx.fill();
-              }
+              drawShipSkin(ctx, shipSkin, color, secColor, p.holdingJump);
             } else if (p.mode === 'WAVE') {
-              ctx.fillStyle = color;
-              ctx.beginPath();
-              ctx.moveTo(18, 0);
-              ctx.lineTo(-14, -12);
-              ctx.lineTo(-6, 0);
-              ctx.lineTo(-14, 12);
-              ctx.closePath();
-              ctx.fill();
-              ctx.strokeStyle = '#FEF08A';
-              ctx.lineWidth = 2;
-              ctx.stroke();
+              drawWaveSkin(ctx, waveSkin, color, secColor);
             }
 
             ctx.restore();
           }
 
-          ctx.restore(); // END TRACK ISOLATION
+          ctx.restore();
         });
 
         // Center Split Divider
@@ -1318,7 +1450,6 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
         ctx.lineTo(canvas.width, DUAL_TRACK_HEIGHT);
         ctx.stroke();
 
-        // Central Badge
         ctx.fillStyle = '#0F172A';
         ctx.fillRect(canvas.width / 2 - 80, DUAL_TRACK_HEIGHT - 13, 160, 26);
         ctx.strokeStyle = '#38BDF8';
@@ -1327,7 +1458,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
         ctx.fillStyle = '#38BDF8';
         ctx.font = 'bold 11px sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText('SONSUZ DÜELLO · ARENA', canvas.width / 2, DUAL_TRACK_HEIGHT + 4);
+        ctx.fillText(activeView === 'ONLINE_GAME' ? 'CANLI ONLİNE DÜELLO' : 'SONSUZ DÜELLO · 5 CAN', canvas.width / 2, DUAL_TRACK_HEIGHT + 4);
         ctx.textAlign = 'left';
       }
 
@@ -1354,56 +1485,426 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
     animId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animId);
   }, [
-    gamePlayMode,
+    activeView,
     gameState,
     levelIdx,
     levels,
+    cosmetics,
     showHitboxes,
     winner,
     speedMultiplier,
     allowDynamicSpeed,
     generateEndlessSegment,
     onScoreUpdate,
+    playerName,
+    myOnlineSlot,
+    onlineOpponent,
   ]);
 
+  // =========================================================================
+  // RENDER MAIN MENU VIEW
+  // =========================================================================
+  if (activeView === 'MAIN_MENU') {
+    return (
+      <div className="relative rounded-2xl overflow-hidden border border-white/10 bg-[#090D18] p-6 sm:p-8 flex flex-col items-center justify-between min-h-[580px] shadow-2xl text-center select-none">
+        {/* Animated Cyber Grid & Glowing Stars Background */}
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_0%,rgba(59,130,246,0.18),transparent_65%)] pointer-events-none" />
+        <div
+          className="absolute inset-0 opacity-15 pointer-events-none"
+          style={{
+            backgroundImage:
+              'linear-gradient(rgba(255,255,255,0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.08) 1px, transparent 1px)',
+            backgroundSize: '36px 36px',
+          }}
+        />
+
+        {/* Ambient Floating Shapes */}
+        <div className="absolute top-12 left-10 w-12 h-12 rounded-lg border-2 border-blue-500/20 rotate-12 animate-pulse pointer-events-none" />
+        <div className="absolute top-24 right-12 w-10 h-10 rounded-lg border-2 border-amber-500/20 -rotate-12 animate-pulse pointer-events-none" />
+        <div className="absolute bottom-16 left-16 w-8 h-8 rounded-lg border-2 border-emerald-500/20 rotate-45 pointer-events-none" />
+        <div className="absolute bottom-20 right-20 w-14 h-14 rounded-lg border-2 border-purple-500/20 -rotate-6 pointer-events-none" />
+
+        {/* Header Bar */}
+        <div className="w-full flex items-center justify-between text-xs text-slate-400 z-10">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-blue-500 shadow-sm animate-ping" />
+            <span className="font-extrabold text-white tracking-widest uppercase text-[11px] sm:text-xs">
+              GEOMETRY DASH ARENA
+            </span>
+            <span className="hidden sm:inline-block px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/20 text-blue-300 border border-blue-500/30">
+              v2.5 ONLINE
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowHelpModal(true)}
+              className="px-2.5 py-1.5 rounded-lg bg-slate-900/80 hover:bg-slate-800 border border-white/10 text-slate-300 font-semibold text-xs flex items-center gap-1 cursor-pointer transition-colors"
+            >
+              <HelpCircle className="w-3.5 h-3.5 text-blue-400" />
+              <span className="hidden sm:inline">Kontroller</span>
+            </button>
+            <button
+              onClick={() => setActiveView('GARAGE')}
+              className="flex items-center gap-2 bg-slate-900/80 hover:bg-slate-800 px-3 py-1.5 rounded-full border border-white/10 cursor-pointer transition-colors"
+            >
+              <div
+                className="w-4 h-4 rounded-sm border border-white/40 shadow-sm"
+                style={{ backgroundColor: cosmetics.primaryColor }}
+              />
+              <span className="font-bold text-white text-xs">{playerName}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Central Logo & Rhythm Pulse */}
+        <div className="my-6 flex flex-col items-center gap-3 z-10">
+          <div className="relative group cursor-pointer" onClick={() => sound.playBeat(1)}>
+            <h1 className="font-display text-4xl sm:text-6xl lg:text-7xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-sky-300 to-indigo-400 tracking-tight drop-shadow-[0_8px_24px_rgba(59,130,246,0.4)]">
+              GEOMETRY DASH
+            </h1>
+            <span className="absolute -bottom-3 right-0 sm:right-2 text-[11px] font-black tracking-widest text-amber-400 uppercase bg-amber-500/15 px-2.5 py-0.5 rounded-full border border-amber-500/40 shadow-sm">
+              RİTMİK ARENA
+            </span>
+          </div>
+          <p className="text-xs sm:text-sm text-slate-300 max-w-lg mt-2 leading-relaxed">
+            10 seviyeli Solo Macera, aynı ekranda 2 Kişilik Sonsuz Düello ve arkadaşınla canlı çok oyunculu yarış!
+          </p>
+        </div>
+
+        {/* 4 Big Main Menu Buttons */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 w-full max-w-4xl z-10">
+          {/* 1. Solo Play */}
+          <div className="p-5 rounded-2xl bg-gradient-to-b from-blue-600/30 to-blue-950/60 border border-blue-500/40 hover:border-blue-400 hover:scale-[1.02] transition-all cursor-pointer flex flex-col items-center justify-between text-center group shadow-xl">
+            <div
+              className="w-full flex flex-col items-center"
+              onClick={() => {
+                setActiveView('SOLO');
+                setGameState('TITLE_MENU');
+                sound.playPop();
+              }}
+            >
+              <div className="p-3.5 rounded-2xl bg-blue-600 text-white shadow-lg mb-3 group-hover:bg-blue-500 transition-colors group-hover:rotate-6">
+                <Play className="w-7 h-7 fill-current" />
+              </div>
+              <h3 className="font-extrabold text-base text-white mb-1">Solo Macera</h3>
+              <p className="text-xs text-slate-300 mb-3">10 seviye, pratik modu ve ritim engelleri</p>
+            </div>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowLevelModal(true);
+                sound.playPop();
+              }}
+              className="w-full mt-2 py-1.5 px-3 rounded-lg bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/40 text-blue-200 text-xs font-bold transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Star className="w-3.5 h-3.5 fill-current text-amber-400" />
+              Bölüm Seç ({levelIdx + 1}/10)
+            </button>
+          </div>
+
+          {/* 2. Local 2-Player Versus */}
+          <div
+            onClick={() => {
+              setActiveView('LOCAL_DUAL');
+              setGameState('TITLE_MENU');
+              sound.playPop();
+            }}
+            className="p-5 rounded-2xl bg-gradient-to-b from-purple-600/30 to-indigo-950/60 border border-purple-500/40 hover:border-purple-400 hover:scale-[1.02] transition-all cursor-pointer flex flex-col items-center justify-between text-center group shadow-xl"
+          >
+            <div className="w-full flex flex-col items-center">
+              <div className="p-3.5 rounded-2xl bg-purple-600 text-white shadow-lg mb-3 group-hover:bg-purple-500 transition-colors group-hover:-rotate-6">
+                <Users className="w-7 h-7" />
+              </div>
+              <h3 className="font-extrabold text-base text-white mb-1">2 Kişilik Düello</h3>
+              <p className="text-xs text-slate-300 mb-3">Yatay bölünmüş ekran, 5 can ve 1x/2x/3x hız</p>
+            </div>
+            <div className="w-full mt-2 py-1.5 px-2 rounded-lg bg-purple-500/20 border border-purple-500/40 text-purple-200 text-[11px] font-bold">
+              ⚔️ İlk 5 Canı Biten Kaybeder!
+            </div>
+          </div>
+
+          {/* 3. Online Multiplayer */}
+          <div
+            onClick={() => {
+              setActiveView('ONLINE_LOBBY');
+              sound.playPop();
+            }}
+            className="p-5 rounded-2xl bg-gradient-to-b from-emerald-600/30 to-teal-950/60 border border-emerald-500/40 hover:border-emerald-400 hover:scale-[1.02] transition-all cursor-pointer flex flex-col items-center justify-between text-center group shadow-xl"
+          >
+            <div className="w-full flex flex-col items-center">
+              <div className="p-3.5 rounded-2xl bg-emerald-600 text-white shadow-lg mb-3 group-hover:bg-emerald-500 transition-colors group-hover:scale-110">
+                <Globe className="w-7 h-7" />
+              </div>
+              <h3 className="font-extrabold text-base text-white mb-1">Online Düello</h3>
+              <p className="text-xs text-slate-300 mb-3">Oda kodu veya hızlı eşleşmeyle canlı çok oyunculu</p>
+            </div>
+            <div className="w-full mt-2 py-1.5 px-2 rounded-lg bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 text-[11px] font-bold flex items-center justify-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+              Canlı Çok Oyunculu
+            </div>
+          </div>
+
+          {/* 4. Garage / Icon Kit */}
+          <div
+            onClick={() => {
+              setActiveView('GARAGE');
+              sound.playPop();
+            }}
+            className="p-5 rounded-2xl bg-gradient-to-b from-amber-600/30 to-orange-950/60 border border-amber-500/40 hover:border-amber-400 hover:scale-[1.02] transition-all cursor-pointer flex flex-col items-center justify-between text-center group shadow-xl"
+          >
+            <div className="w-full flex flex-col items-center">
+              <div className="p-3.5 rounded-2xl bg-amber-500 text-slate-950 shadow-lg mb-3 group-hover:bg-amber-400 transition-colors group-hover:rotate-12">
+                <Palette className="w-7 h-7" />
+              </div>
+              <h3 className="font-extrabold text-base text-white mb-1">Garaj & Kostüm</h3>
+              <p className="text-xs text-slate-300 mb-3">20 küp, 10 roket, 10 wave, renk ve efekt atölyesi</p>
+            </div>
+            <div className="w-full mt-2 py-1.5 px-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[11px] font-bold">
+              🎨 40+ Görünüm & Efekt
+            </div>
+          </div>
+        </div>
+
+        {/* Quick Footer Stats */}
+        <div className="w-full pt-6 mt-6 border-t border-white/10 flex flex-wrap items-center justify-between text-xs text-slate-400 z-10">
+          <div className="flex items-center gap-4">
+            <span className="flex items-center gap-1.5 text-blue-400 font-semibold">
+              <Trophy className="w-4 h-4 text-amber-400" /> En Yüksek İlerleme: %{progressPct}
+            </span>
+            <span className="text-slate-600">·</span>
+            <span>Deneme Sayısı: {attempts}</span>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <span className="text-slate-400">Aktif Kostüm:</span>
+            <span
+              className="px-2.5 py-0.5 rounded-md font-bold text-white border border-white/20 text-[11px] shadow-sm"
+              style={{ backgroundColor: cosmetics.primaryColor }}
+            >
+              {cosmetics.cubeSkin}
+            </span>
+          </div>
+        </div>
+
+        {/* LEVEL SELECTOR MODAL */}
+        {showLevelModal && (
+          <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md z-40 flex flex-col items-center justify-center p-4 sm:p-6">
+            <div className="bg-[#101726] border border-white/10 rounded-2xl max-w-2xl w-full p-5 shadow-2xl flex flex-col gap-4 text-left max-h-[90vh] overflow-hidden">
+              <div className="flex items-center justify-between border-b border-white/10 pb-3">
+                <div className="flex items-center gap-2">
+                  <Star className="w-5 h-5 text-amber-400 fill-amber-400" />
+                  <h3 className="text-lg font-black text-white">Seviye Seçimi (10 Seviye)</h3>
+                </div>
+                <button
+                  onClick={() => setShowLevelModal(false)}
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 overflow-y-auto pr-1 max-h-[60vh]">
+                {levels.map((lvl, idx) => (
+                  <div
+                    key={lvl.id}
+                    onClick={() => {
+                      setLevelIdx(idx);
+                      setShowLevelModal(false);
+                      setActiveView('SOLO');
+                      setGameState('TITLE_MENU');
+                      sound.playPop();
+                    }}
+                    className={`p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between ${
+                      levelIdx === idx
+                        ? 'bg-blue-900/40 border-blue-400 ring-2 ring-blue-500/30'
+                        : 'bg-slate-900/60 border-white/5 hover:border-white/20 hover:bg-slate-800/60'
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono-num text-xs font-bold text-slate-400">
+                          #{idx + 1 < 10 ? `0${idx + 1}` : idx + 1}
+                        </span>
+                        <h4 className="font-bold text-sm text-white">{lvl.name}</h4>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-0.5 line-clamp-1">{lvl.desc}</p>
+                    </div>
+
+                    <div className="text-right shrink-0">
+                      <span
+                        className="px-2 py-0.5 rounded text-[10px] font-extrabold uppercase border"
+                        style={{
+                          color: lvl.accent,
+                          borderColor: `${lvl.accent}40`,
+                          backgroundColor: `${lvl.accent}15`,
+                        }}
+                      >
+                        {lvl.difficulty}
+                      </span>
+                      <p className="text-[10px] text-slate-400 mt-1">Hız: {lvl.speed}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* HOW TO PLAY / CONTROLS MODAL */}
+        {showHelpModal && (
+          <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md z-40 flex flex-col items-center justify-center p-4 sm:p-6">
+            <div className="bg-[#101726] border border-white/10 rounded-2xl max-w-lg w-full p-5 shadow-2xl flex flex-col gap-4 text-left">
+              <div className="flex items-center justify-between border-b border-white/10 pb-3">
+                <div className="flex items-center gap-2">
+                  <HelpCircle className="w-5 h-5 text-blue-400" />
+                  <h3 className="text-lg font-black text-white">Oyun Kontrolleri & Rehber</h3>
+                </div>
+                <button
+                  onClick={() => setShowHelpModal(false)}
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="flex flex-col gap-3 text-xs text-slate-300 max-h-[65vh] overflow-y-auto pr-1">
+                <div className="p-3 rounded-xl bg-blue-950/30 border border-blue-500/20">
+                  <h4 className="font-bold text-blue-400 mb-1">🎮 Solo & 1. Oyuncu Kontrolleri</h4>
+                  <p className="leading-relaxed">
+                    <strong>Boşluk</strong>, <strong>Yukarı Ok</strong>, <strong>W</strong> veya ekrana sol tık ile zıpla.
+                    Pratik modunda <strong>Z</strong> tuşu kontrol noktası bırakır.
+                  </p>
+                </div>
+
+                <div className="p-3 rounded-xl bg-rose-950/30 border border-rose-500/20">
+                  <h4 className="font-bold text-rose-400 mb-1">⚔️ 2. Oyuncu Kontrolleri (Yerel Düello)</h4>
+                  <p className="leading-relaxed">
+                    <strong>Aşağı Ok</strong>, <strong>Enter</strong>, <strong>L</strong> veya alt ekrana tıkla.
+                  </p>
+                </div>
+
+                <div className="p-3 rounded-xl bg-slate-900 border border-white/10">
+                  <h4 className="font-bold text-amber-400 mb-1">🚀 Araç Modları</h4>
+                  <ul className="list-disc pl-4 space-y-1 text-slate-400">
+                    <li><strong>Küp:</strong> Zıpla ve blokların üzerine in.</li>
+                    <li><strong>Roket (Ship):</strong> Tuşa basılı tutarak yüksel, bırakınca alçal.</li>
+                    <li><strong>Wave (Dalga):</strong> Basılı tutunca 45° yukarı, bırakınca 45° aşağı fırla!</li>
+                    <li><strong>Orblar:</strong> Havadayken halkaya girince tıkla, ek sıçrama kazan!</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // RENDER GARAGE MODAL / VIEW
+  // =========================================================================
+  if (activeView === 'GARAGE') {
+    return (
+      <GDGarageModal
+        cosmetics={cosmetics}
+        playerName={playerName}
+        onUpdate={(newCos, newName) => {
+          setCosmetics(newCos);
+          setPlayerName(newName);
+        }}
+        onClose={() => setActiveView('MAIN_MENU')}
+      />
+    );
+  }
+
+  // =========================================================================
+  // RENDER ONLINE MULTIPLAYER LOBBY
+  // =========================================================================
+  if (activeView === 'ONLINE_LOBBY') {
+    return (
+      <GDOnlineLobby
+        playerName={playerName}
+        myCosmetics={cosmetics}
+        onStartMatch={handleStartOnlineMatch}
+        onBackToMenu={() => setActiveView('MAIN_MENU')}
+      />
+    );
+  }
+
+  // =========================================================================
+  // RENDER IN-GAME ARENA (SOLO, LOCAL DUAL, ONLINE GAME)
+  // =========================================================================
   return (
     <div className="flex flex-col gap-4">
-      {/* Mode Selector Tabs (Tek Kişilik vs 2 Kişilik Sonsuz Düello) */}
+      {/* Top Navigation & Mode Selector */}
       <div className="bg-[#131B2E] border border-white/10 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 shadow-lg">
         <div className="flex items-center gap-2">
+          {/* Back to Main Menu Button */}
           <button
             onClick={() => {
-              setGamePlayMode('SOLO');
+              if (activeView === 'ONLINE_GAME' && onlineWsRef.current) {
+                onlineWsRef.current.close();
+              }
+              setActiveView('MAIN_MENU');
+              setGameState('TITLE_MENU');
+              sound.playPop();
+            }}
+            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+          >
+            <Home className="w-3.5 h-3.5" /> Ana Menü
+          </button>
+
+          {/* Mode Switchers */}
+          <button
+            onClick={() => {
+              setActiveView('SOLO');
               setGameState('TITLE_MENU');
             }}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-2 ${
-              gamePlayMode === 'SOLO'
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+              activeView === 'SOLO'
                 ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-500/30'
                 : 'bg-slate-800 text-slate-400 hover:text-white'
             }`}
           >
-            <User className="w-4 h-4" />
-            Tek Kişilik Mod (10 Seviye)
+            <User className="w-3.5 h-3.5" /> Solo (10 Seviye)
           </button>
           <button
             onClick={() => {
-              setGamePlayMode('DUAL');
+              setActiveView('LOCAL_DUAL');
               setGameState('TITLE_MENU');
             }}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-2 ${
-              gamePlayMode === 'DUAL'
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+              activeView === 'LOCAL_DUAL'
                 ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-500/30'
                 : 'bg-slate-800 text-slate-400 hover:text-white'
             }`}
           >
-            <Users className="w-4 h-4" />
-            2 Kişilik Sonsuz Düello (5 Can · Ship & Wave)
+            <Users className="w-3.5 h-3.5" /> 2 Kişilik Yerel
+          </button>
+          <button
+            onClick={() => {
+              setActiveView('ONLINE_LOBBY');
+            }}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+              activeView === 'ONLINE_GAME'
+                ? 'bg-emerald-600 text-white shadow-md ring-2 ring-emerald-500/30'
+                : 'bg-slate-800 text-slate-400 hover:text-white'
+            }`}
+          >
+            <Globe className="w-3.5 h-3.5" /> Online Düello
           </button>
         </div>
 
-        {/* Practice & Hitbox switches */}
-        <div className="flex items-center gap-3 text-xs">
-          {gamePlayMode === 'SOLO' && (
+        {/* Right Action: Garage Quick Link & Hitbox */}
+        <div className="flex items-center gap-2 text-xs">
+          <button
+            onClick={() => setActiveView('GARAGE')}
+            className="px-2.5 py-1 rounded-md text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30 cursor-pointer flex items-center gap-1"
+          >
+            <Palette className="w-3.5 h-3.5" /> Garaj / Kostümler
+          </button>
+          {activeView === 'SOLO' && (
             <button
               onClick={() => setPracticeMode((p) => !p)}
               className={`px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer ${
@@ -1412,25 +1913,24 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
                   : 'bg-slate-800 text-slate-400'
               }`}
             >
-              Pratik Modu (Z Tuşu): {practiceMode ? 'AÇIK' : 'KAPALI'}
+              Pratik (Z): {practiceMode ? 'AÇIK' : 'KAPALI'}
             </button>
           )}
           <button
             onClick={() => setShowHitboxes((h) => !h)}
-            className={`px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer flex items-center gap-1.5 ${
+            className={`px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer flex items-center gap-1 ${
               showHitboxes
                 ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
                 : 'bg-slate-800 text-slate-400'
             }`}
           >
-            <Eye className="w-3.5 h-3.5" />
-            Hitbox: {showHitboxes ? 'AÇIK' : 'KAPALI'}
+            <Eye className="w-3.5 h-3.5" /> Hitbox: {showHitboxes ? 'AÇIK' : 'KAPALI'}
           </button>
         </div>
       </div>
 
-      {/* Mode Sub-Bar */}
-      {gamePlayMode === 'SOLO' ? (
+      {/* Mode Sub-Bar (Level Selector or Dual Lives HUD) */}
+      {activeView === 'SOLO' ? (
         <div className="bg-[#131B2E] border border-white/10 rounded-xl p-3 flex items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-1.5">
             <button
@@ -1471,7 +1971,14 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
           {/* Player 1 Lives */}
           <div className="flex items-center gap-2">
             <span className="w-3.5 h-3.5 rounded-full bg-blue-500 shadow-sm" />
-            <span className="text-xs font-bold text-white">1. Oyuncu (Mavi):</span>
+            <span className="text-xs font-bold text-white">
+              {activeView === 'ONLINE_GAME'
+                ? myOnlineSlot === 'P1'
+                  ? `Sen (${playerName})`
+                  : onlineOpponent?.name || '1. Oyuncu'
+                : '1. Oyuncu (Mavi)'}
+              :
+            </span>
             <div className="flex items-center gap-1">
               {Array.from({ length: INITIAL_LIVES }).map((_, i) => (
                 <Heart
@@ -1536,7 +2043,14 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
           {/* Player 2 Lives */}
           <div className="flex items-center gap-2">
             <span className="w-3.5 h-3.5 rounded-full bg-rose-500 shadow-sm" />
-            <span className="text-xs font-bold text-white">2. Oyuncu (Kırmızı):</span>
+            <span className="text-xs font-bold text-white">
+              {activeView === 'ONLINE_GAME'
+                ? myOnlineSlot === 'P2'
+                  ? `Sen (${playerName})`
+                  : onlineOpponent?.name || '2. Oyuncu'
+                : '2. Oyuncu (Kırmızı)'}
+              :
+            </span>
             <div className="flex items-center gap-1">
               {Array.from({ length: INITIAL_LIVES }).map((_, i) => (
                 <Heart
@@ -1554,28 +2068,34 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
         </div>
       )}
 
-      {/* Canvas Arena */}
+      {/* Canvas Screen */}
       <div
         className="relative rounded-xl overflow-hidden border border-white/10 bg-[#060911] select-none shadow-2xl"
         onMouseDown={(e) => {
           if (gameState === 'PLAYING') {
-            if (gamePlayMode === 'SOLO') {
+            if (activeView === 'SOLO') {
               triggerSoloJump();
-            } else {
+            } else if (activeView === 'LOCAL_DUAL') {
               const rect = canvasRef.current?.getBoundingClientRect();
               if (rect) {
                 const clickY = e.clientY - rect.top;
                 if (clickY < rect.height / 2) triggerP1Jump();
                 else triggerP2Jump();
               }
+            } else if (activeView === 'ONLINE_GAME') {
+              if (myOnlineSlot === 'P1') triggerP1Jump();
+              else triggerP2Jump();
             }
           }
         }}
         onMouseUp={() => {
-          if (gamePlayMode === 'SOLO') releaseSoloJump();
-          else {
+          if (activeView === 'SOLO') releaseSoloJump();
+          else if (activeView === 'LOCAL_DUAL') {
             releaseP1Jump();
             releaseP2Jump();
+          } else if (activeView === 'ONLINE_GAME') {
+            if (myOnlineSlot === 'P1') releaseP1Jump();
+            else releaseP2Jump();
           }
         }}
       >
@@ -1596,11 +2116,15 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
           </div>
         )}
 
-        {/* Countdown Overlay for fair start in 2-Player Mode */}
+        {/* Countdown Overlay */}
         {gameState === 'COUNTDOWN' && (
           <div className="absolute inset-0 bg-slate-950/70 backdrop-blur-sm flex flex-col items-center justify-center pointer-events-none z-30">
-            <span className="text-xs font-bold text-blue-400 tracking-widest uppercase mb-2">DÜELLO BAŞLIYOR</span>
-            <span className="text-7xl sm:text-8xl font-black text-white font-mono-num animate-ping">{countdownNum}</span>
+            <span className="text-xs font-bold text-blue-400 tracking-widest uppercase mb-2">
+              DÜELLO BAŞLIYOR
+            </span>
+            <span className="text-7xl sm:text-8xl font-black text-white font-mono-num animate-ping">
+              {countdownNum}
+            </span>
           </div>
         )}
 
@@ -1616,19 +2140,27 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
           </button>
         )}
 
-        {/* TITLE MENU */}
+        {/* TITLE MENU MODAL */}
         {gameState === 'TITLE_MENU' && (
           <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center z-20">
-            {gamePlayMode === 'SOLO' ? (
+            {activeView === 'SOLO' ? (
               <>
                 <h2 className="text-2xl sm:text-3xl font-bold text-white mb-2">{currentLevel.name}</h2>
                 <p className="text-sm text-slate-300 max-w-md mb-6">{currentLevel.desc}</p>
-                <button
-                  onClick={startPlay}
-                  className="px-8 py-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm flex items-center gap-2 cursor-pointer shadow-lg transition-colors"
-                >
-                  <Play className="w-4 h-4 fill-current" /> Seviyeyi Başlat (Boşluk / Sol Tık)
-                </button>
+                <div className="flex gap-3">
+                  <button
+                    onClick={startPlay}
+                    className="px-8 py-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm flex items-center gap-2 cursor-pointer shadow-lg transition-colors"
+                  >
+                    <Play className="w-4 h-4 fill-current" /> Seviyeyi Başlat (Boşluk / Sol Tık)
+                  </button>
+                  <button
+                    onClick={() => setActiveView('MAIN_MENU')}
+                    className="px-4 py-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-sm cursor-pointer transition-colors"
+                  >
+                    Ana Menü
+                  </button>
+                </div>
               </>
             ) : (
               <>
@@ -1637,7 +2169,7 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
                   <h2 className="text-2xl sm:text-3xl font-bold text-white">2 Kişilik Sonsuz Düello</h2>
                 </div>
                 <p className="text-sm text-slate-300 max-w-lg mb-6">
-                  Tamamen yenilendi! Her oyuncunun <strong>5 canı</strong> var. Çarptığınızda <strong>1.5 saniye koruma kalkanı</strong> devreye girer. Cube, Ship ve Wave modlarında adil yarış!
+                  Ekran yatay olarak ikiye ayrıldı! Her oyuncunun <strong>5 canı</strong> var. Çarptığınızda <strong>1.5 saniye koruma kalkanı</strong> devreye girer. Cube, Ship ve Wave modlarında adil yarış!
                 </p>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6 max-w-lg w-full text-left text-xs">
@@ -1655,12 +2187,20 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
                   </div>
                 </div>
 
-                <button
-                  onClick={startPlay}
-                  className="px-8 py-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm flex items-center gap-2 cursor-pointer shadow-lg transition-colors"
-                >
-                  <Play className="w-4 h-4 fill-current" /> Düelloyu Başlat (3-2-1 Başlangıç)
-                </button>
+                <div className="flex gap-3">
+                  <button
+                    onClick={startPlay}
+                    className="px-8 py-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm flex items-center gap-2 cursor-pointer shadow-lg transition-colors"
+                  >
+                    <Play className="w-4 h-4 fill-current" /> Düelloyu Başlat (3-2-1 Başlangıç)
+                  </button>
+                  <button
+                    onClick={() => setActiveView('MAIN_MENU')}
+                    className="px-4 py-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-sm cursor-pointer transition-colors"
+                  >
+                    Ana Menü
+                  </button>
+                </div>
               </>
             )}
           </div>
@@ -1683,6 +2223,15 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
               >
                 <RotateCcw className="w-4 h-4" /> Baştan Başla
               </button>
+              <button
+                onClick={() => {
+                  setActiveView('MAIN_MENU');
+                  setGameState('TITLE_MENU');
+                }}
+                className="px-5 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Home className="w-4 h-4" /> Ana Menü
+              </button>
             </div>
           </div>
         )}
@@ -1690,25 +2239,39 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
         {/* GAME OVER (Winner or Crash) */}
         {gameState === 'GAME_OVER' && (
           <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center z-20">
-            {gamePlayMode === 'SOLO' ? (
+            {activeView === 'SOLO' ? (
               <>
                 <h3 className="text-2xl font-bold text-rose-400 mb-1">Engele Çarptın!</h3>
                 <p className="text-sm text-slate-300 mb-5">
                   Ulaşılan İlerleme: <span className="font-mono-num font-semibold text-white">%{progressPct}</span>
                 </p>
-                <button
-                  onClick={restartPlay}
-                  className="px-8 py-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm flex items-center gap-2 cursor-pointer shadow-lg transition-colors"
-                >
-                  <RotateCcw className="w-4 h-4" /> Tekrar Oyna (Boşluk)
-                </button>
+                <div className="flex gap-3">
+                  <button
+                    onClick={restartPlay}
+                    className="px-8 py-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm flex items-center gap-2 cursor-pointer shadow-lg transition-colors"
+                  >
+                    <RotateCcw className="w-4 h-4" /> Tekrar Oyna (Boşluk)
+                  </button>
+                  <button
+                    onClick={() => setActiveView('MAIN_MENU')}
+                    className="px-4 py-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-sm cursor-pointer transition-colors"
+                  >
+                    Ana Menü
+                  </button>
+                </div>
               </>
             ) : (
               <>
                 {winner === 'P1' && (
                   <>
                     <Trophy className="w-14 h-14 text-blue-400 mb-2 animate-bounce" />
-                    <h3 className="text-2xl sm:text-3xl font-bold text-blue-400 mb-1">1. OYUNCU (MAVİ) KAZANDI!</h3>
+                    <h3 className="text-2xl sm:text-3xl font-bold text-blue-400 mb-1">
+                      {activeView === 'ONLINE_GAME'
+                        ? myOnlineSlot === 'P1'
+                          ? 'TEBRİKLER, SEN KAZANDIN!'
+                          : `${onlineOpponent?.name || '1. Oyuncu'} KAZANDI!`
+                        : '1. OYUNCU (MAVİ) KAZANDI!'}
+                    </h3>
                     <p className="text-sm text-slate-300 mb-6">
                       2. Oyuncunun 5 canı tükendi! Kat edilen rekor mesafe: <strong>{endlessDistance}m</strong>
                     </p>
@@ -1717,18 +2280,43 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
                 {winner === 'P2' && (
                   <>
                     <Trophy className="w-14 h-14 text-rose-400 mb-2 animate-bounce" />
-                    <h3 className="text-2xl sm:text-3xl font-bold text-rose-400 mb-1">2. OYUNCU (KIRMIZI) KAZANDI!</h3>
+                    <h3 className="text-2xl sm:text-3xl font-bold text-rose-400 mb-1">
+                      {activeView === 'ONLINE_GAME'
+                        ? myOnlineSlot === 'P2'
+                          ? 'TEBRİKLER, SEN KAZANDIN!'
+                          : `${onlineOpponent?.name || '2. Oyuncu'} KAZANDI!`
+                        : '2. OYUNCU (KIRMIZI) KAZANDI!'}
+                    </h3>
                     <p className="text-sm text-slate-300 mb-6">
                       1. Oyuncunun 5 canı tükendi! Kat edilen rekor mesafe: <strong>{endlessDistance}m</strong>
                     </p>
                   </>
                 )}
-                <button
-                  onClick={restartPlay}
-                  className="px-8 py-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm flex items-center gap-2 cursor-pointer shadow-lg transition-colors"
-                >
-                  <RotateCcw className="w-4 h-4" /> Yeniden Başla (Rövanş · 5 Can)
-                </button>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => {
+                      if (activeView === 'ONLINE_GAME' && onlineWsRef.current?.readyState === WebSocket.OPEN) {
+                        onlineWsRef.current.send(JSON.stringify({ type: 'GD_REMATCH' }));
+                      } else {
+                        restartPlay();
+                      }
+                    }}
+                    className="px-8 py-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm flex items-center gap-2 cursor-pointer shadow-lg transition-colors"
+                  >
+                    <RotateCcw className="w-4 h-4" /> Yeniden Başla (Rövanş · 5 Can)
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (activeView === 'ONLINE_GAME' && onlineWsRef.current) {
+                        onlineWsRef.current.close();
+                      }
+                      setActiveView('MAIN_MENU');
+                    }}
+                    className="px-4 py-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-sm cursor-pointer transition-colors"
+                  >
+                    Ana Menü
+                  </button>
+                </div>
               </>
             )}
           </div>
@@ -1740,42 +2328,26 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
             <CheckCircle2 className="w-12 h-12 text-emerald-400 mb-2" />
             <h3 className="text-2xl font-bold text-white mb-1">Bölüm Tamamlandı!</h3>
             <p className="text-sm text-slate-300 mb-5">{currentLevel.name} etabını başarıyla bitirdin!</p>
-            <button
-              onClick={() => {
-                if (levelIdx < levels.length - 1) setLevelIdx((i) => i + 1);
-                startPlay();
-              }}
-              className="px-8 py-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm flex items-center gap-2 cursor-pointer shadow-lg transition-colors"
-            >
-              <Play className="w-4 h-4 fill-current" /> Sonraki Bölüme Geç
-            </button>
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  if (levelIdx < levels.length - 1) setLevelIdx((i) => i + 1);
+                  startPlay();
+                }}
+                className="px-8 py-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm flex items-center gap-2 cursor-pointer shadow-lg transition-colors"
+              >
+                <Play className="w-4 h-4 fill-current" /> Sonraki Bölüme Geç
+              </button>
+              <button
+                onClick={() => setActiveView('MAIN_MENU')}
+                className="px-4 py-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-sm cursor-pointer transition-colors"
+              >
+                Ana Menü
+              </button>
+            </div>
           </div>
         )}
       </div>
-
-      {/* 2-Player Jump Touch/Click Buttons for convenience */}
-      {gamePlayMode === 'DUAL' && gameState === 'PLAYING' && (
-        <div className="grid grid-cols-2 gap-3 sm:hidden">
-          <button
-            onMouseDown={triggerP1Jump}
-            onMouseUp={releaseP1Jump}
-            onTouchStart={triggerP1Jump}
-            onTouchEnd={releaseP1Jump}
-            className="py-3 rounded-xl bg-blue-600 active:bg-blue-700 text-white font-bold text-sm select-none shadow-lg"
-          >
-            1. Oyuncu Zıpla (Mavi)
-          </button>
-          <button
-            onMouseDown={triggerP2Jump}
-            onMouseUp={releaseP2Jump}
-            onTouchStart={triggerP2Jump}
-            onTouchEnd={releaseP2Jump}
-            className="py-3 rounded-xl bg-rose-600 active:bg-rose-700 text-white font-bold text-sm select-none shadow-lg"
-          >
-            2. Oyuncu Zıpla (Kırmızı)
-          </button>
-        </div>
-      )}
 
       {/* Guide Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs text-slate-300 bg-[#131B2E] border border-white/10 rounded-xl p-3.5 shadow-md">
@@ -1784,25 +2356,25 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
           <div>
             <p className="font-semibold text-white">1.5 Saniyelik Koruma Kalkanı</p>
             <p className="text-slate-400">
-              Engellere çarptığınızda koruma kalkanı açılarak peş peşe can kaybetmenizi engeller, toparlanmanız için süre tanır.
+              Engellere çarptığınızda koruma kalkanı açılarak peş peşe can kaybetmenizi engeller.
             </p>
           </div>
         </div>
         <div className="flex items-start gap-2.5">
           <Zap className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
           <div>
-            <p className="font-semibold text-white">Dengeli 1X, 2X ve 3X Hız</p>
+            <p className="font-semibold text-white">1X, 2X ve 3X Hız Modları</p>
             <p className="text-slate-400">
-              Yoldaki portallardan veya üstteki hız butonlarından dilediğiniz tempoyu seçebilirsiniz. Engeller hız seviyelerine göre optimize edilmiştir.
+              Yoldaki portallardan veya üstteki hız butonlarından dilediğiniz tempoyu seçebilirsiniz.
             </p>
           </div>
         </div>
         <div className="flex items-start gap-2.5">
-          <Flame className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+          <Globe className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
           <div>
-            <p className="font-semibold text-white">Solo & 2 Kişilik Denge</p>
+            <p className="font-semibold text-white">Canlı Online & Kostümler</p>
             <p className="text-slate-400">
-              Tek kişilik moddaki 10 seviyenin tamamı adil ve geçilebilir hale getirildi; 2 kişilik mod ise sıfırdan pürüzsüz akacak şekilde kurgulandı.
+              Arkadaşınla oda kodu paylaşarak internet üzerinden canlı düello yapabilir, garajdaki kostümlerinle yarışabilirsin!
             </p>
           </div>
         </div>
