@@ -30,9 +30,9 @@ const GAMES: GameInfo[] = [
   {
     id: 'hexa-conquest',
     number: '02',
-    title: 'Hexa Fetih (Online Strateji)',
-    genre: 'Sıra Tabanlı Alan Hakimiyeti · Hızlı Eşleşme',
-    desc: 'Arkadaşınla canlı oda kur ya da Yapay Zekaya karşı taktik savaş ver! Çoğalma ve 2 kare atlama hamleleriyle tahtayı ele geçir.',
+    title: 'Siber Alan: Enerji Savaşları (Strateji)',
+    genre: 'Taktiksel Alan Kapmaca · Enerji & Lazer Yeteneği',
+    desc: 'Kendi siber üssünü genişlet, komşu hücreleri ele geçir, enerji toplayıp Lazer yeteneğiyle rakip taşları patlatarak tahtayı fethet!',
     icon: Swords,
   },
   {

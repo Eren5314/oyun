@@ -197,60 +197,70 @@ export const GeometryDashGame: React.FC<{
     } as PlayerRuntime,
   });
 
-  // Endless pattern generator for Dual & Online
+  // Endless pattern generator for Dual & Online with rich procedural variety and no speed portals
   const generateEndlessSegment = useCallback((startX: number): Obstacle[] => {
     const obs: Obstacle[] = [];
     let x = startX;
     const GY = DUAL_GROUND_Y;
     const CY = DUAL_CEILING_Y;
+    const ORB_Y = GY - 72;
     const playH = GY - CY;
 
-    const modes: VehicleMode[] = ['CUBE', 'SHIP', 'WAVE'];
+    const segmentTypes = ['CUBE_JUMPS', 'ROCKET_TUNNEL', 'WAVE_CORRIDOR', 'PAD_TRAMPOLINE', 'ORB_RHYTHM', 'BLOCK_MAZE'];
 
-    for (let seg = 0; seg < 3; seg++) {
-      const mode = modes[Math.floor(Math.random() * modes.length)];
+    for (let seg = 0; seg < 4; seg++) {
+      const type = segmentTypes[Math.floor(Math.random() * segmentTypes.length)];
 
-      const speedChance = Math.random();
-      if (speedChance > 0.55) {
-        const nextSpeed: SpeedSetting = speedChance > 0.8 ? 3 : 2;
-        const spType = nextSpeed === 3 ? 'SPEED_3X' : 'SPEED_2X';
-        obs.push({ x, y: CY, w: 32, h: playH, type: spType });
-        x += 260;
-      } else if (speedChance < 0.2) {
-        obs.push({ x, y: CY, w: 32, h: playH, type: 'SPEED_1X' });
-        x += 260;
-      }
-
-      if (mode === 'SHIP') {
+      if (type === 'ROCKET_TUNNEL') {
         obs.push({ x, y: CY, w: 36, h: playH, type: 'PORTAL_ROCKET' });
-        x += 350;
-
-        obs.push({ x: x + 100, y: CY, w: 70, h: 50, type: 'BLOCK' });
-        obs.push({ x: x + 380, y: GY - 55, w: 75, h: 55, type: 'BLOCK' });
-        obs.push({ x: x + 680, y: CY, w: 70, h: 50, type: 'BLOCK' });
-        obs.push({ x: x + 960, y: GY - 55, w: 75, h: 55, type: 'BLOCK' });
-        x += 1250;
-      } else if (mode === 'WAVE') {
+        x += 320;
+        obs.push({ x: x + 100, y: CY, w: 75, h: 55, type: 'BLOCK' });
+        obs.push({ x: x + 350, y: GY - 60, w: 75, h: 60, type: 'BLOCK' });
+        obs.push({ x: x + 650, y: CY, w: 75, h: 55, type: 'BLOCK' });
+        obs.push({ x: x + 950, y: GY - 60, w: 75, h: 60, type: 'BLOCK' });
+        obs.push({ x: x + 1150, y: CY, w: 36, h: playH, type: 'PORTAL_CUBE' });
+        x += 1350;
+      } else if (type === 'WAVE_CORRIDOR') {
         obs.push({ x, y: CY, w: 36, h: playH, type: 'PORTAL_WAVE' });
-        x += 350;
-
-        obs.push({ x: x + 120, y: CY, w: 75, h: 48, type: 'BLOCK' });
-        obs.push({ x: x + 380, y: GY - 52, w: 75, h: 52, type: 'BLOCK' });
-        obs.push({ x: x + 640, y: CY, w: 75, h: 48, type: 'BLOCK' });
-        obs.push({ x: x + 900, y: GY - 52, w: 75, h: 52, type: 'BLOCK' });
-        x += 1200;
+        x += 320;
+        obs.push({ x: x + 120, y: CY, w: 75, h: 50, type: 'BLOCK' });
+        obs.push({ x: x + 360, y: GY - 55, w: 75, h: 55, type: 'BLOCK' });
+        obs.push({ x: x + 620, y: CY, w: 75, h: 50, type: 'BLOCK' });
+        obs.push({ x: x + 880, y: GY - 55, w: 75, h: 55, type: 'BLOCK' });
+        obs.push({ x: x + 1120, y: CY, w: 36, h: playH, type: 'PORTAL_CUBE' });
+        x += 1300;
+      } else if (type === 'PAD_TRAMPOLINE') {
+        obs.push({ x, y: CY, w: 36, h: playH, type: 'PORTAL_CUBE' });
+        x += 250;
+        obs.push({ x: x + 100, y: GY - 14, w: 40, h: 14, type: 'PAD' });
+        obs.push({ x: x + 300, y: GY - 14, w: 40, h: 14, type: 'PAD' });
+        obs.push({ x: x + 500, y: GY - 36, w: 68, h: 36, type: 'DOUBLE_SPIKE' });
+        obs.push({ x: x + 700, y: GY - 14, w: 40, h: 14, type: 'PAD' });
+        x += 950;
+      } else if (type === 'ORB_RHYTHM') {
+        obs.push({ x, y: CY, w: 36, h: playH, type: 'PORTAL_CUBE' });
+        x += 250;
+        obs.push({ x: x + 150, y: ORB_Y, w: 34, h: 34, type: 'ORB' });
+        obs.push({ x: x + 220, y: GY - 36, w: 68, h: 36, type: 'DOUBLE_SPIKE' });
+        obs.push({ x: x + 480, y: ORB_Y, w: 34, h: 34, type: 'ORB' });
+        obs.push({ x: x + 550, y: GY - 36, w: 68, h: 36, type: 'DOUBLE_SPIKE' });
+        x += 900;
+      } else if (type === 'BLOCK_MAZE') {
+        obs.push({ x, y: CY, w: 36, h: playH, type: 'PORTAL_CUBE' });
+        x += 250;
+        obs.push({ x: x + 100, y: GY - 45, w: 90, h: 45, type: 'BLOCK' });
+        obs.push({ x: x + 300, y: GY - 90, w: 90, h: 90, type: 'BLOCK' });
+        obs.push({ x: x + 520, y: GY - 14, w: 40, h: 14, type: 'PAD' });
+        obs.push({ x: x + 680, y: GY - 36, w: 34, h: 36, type: 'SPIKE' });
+        x += 1000;
       } else {
         obs.push({ x, y: CY, w: 36, h: playH, type: 'PORTAL_CUBE' });
-        x += 300;
-
-        obs.push({ x: x + 100, y: GY - 28, w: 28, h: 28, type: 'SPIKE' });
-        obs.push({ x: x + 340, y: GY - 12, w: 38, h: 12, type: 'PAD' });
-        obs.push({ x: x + 480, y: GY - 62, w: 28, h: 28, type: 'ORB' });
-        obs.push({ x: x + 530, y: GY - 28, w: 56, h: 28, type: 'DOUBLE_SPIKE' });
-        obs.push({ x: x + 780, y: GY - 38, w: 75, h: 38, type: 'BLOCK' });
-        obs.push({ x: x + 980, y: GY - 28, w: 56, h: 28, type: 'DOUBLE_SPIKE' });
-        obs.push({ x: x + 1220, y: GY - 12, w: 38, h: 12, type: 'PAD' });
-        x += 1350;
+        x += 250;
+        obs.push({ x: x + 100, y: GY - 36, w: 34, h: 36, type: 'SPIKE' });
+        obs.push({ x: x + 320, y: GY - 36, w: 68, h: 36, type: 'DOUBLE_SPIKE' });
+        obs.push({ x: x + 560, y: GY - 14, w: 40, h: 14, type: 'PAD' });
+        obs.push({ x: x + 740, y: GY - 36, w: 102, h: 36, type: 'TRIPLE_SPIKE' });
+        x += 1050;
       }
     }
 
@@ -286,12 +296,12 @@ export const GeometryDashGame: React.FC<{
         eng.solo.holdingJump = false;
         eng.solo.jumpBufferTimer = 0;
         eng.solo.trail = [];
-        eng.obstacles = lvl.obstacles.map((o) => ({ ...o, triggered: false }));
+        eng.obstacles = lvl.obstacles.map((o) => ({ ...o, triggeredP1: false, triggeredP2: false }));
         setProgressPct(Math.min(100, Math.floor((eng.worldX / lvl.length) * 100)));
       } else {
         // LOCAL_DUAL or ONLINE_GAME
         eng.worldX = 0;
-        eng.obstacles = generateEndlessSegment(550);
+        eng.obstacles = generateEndlessSegment(550).map((o) => ({ ...o, triggeredP1: false, triggeredP2: false }));
 
         eng.p1 = {
           playerY: DUAL_GROUND_Y - DUAL_PLAYER_SIZE,
@@ -583,7 +593,7 @@ export const GeometryDashGame: React.FC<{
       const currentSpeed =
         activeView === 'SOLO'
           ? lvl.speed
-          : BASE_SPEEDS[eng.currentSpeedMult] || BASE_SPEEDS[1];
+          : 5.8 + Math.min(3.5, eng.worldX / 4000);
 
       if (gameState === 'PLAYING') {
         eng.worldX += currentSpeed;
@@ -602,7 +612,7 @@ export const GeometryDashGame: React.FC<{
 
           const lastObs = eng.obstacles[eng.obstacles.length - 1];
           if (lastObs && lastObs.x - eng.worldX < CANVAS_WIDTH + 800) {
-            const nextSegment = generateEndlessSegment(lastObs.x + 300);
+            const nextSegment = generateEndlessSegment(lastObs.x + 300).map((o) => ({ ...o, triggeredP1: false, triggeredP2: false }));
             eng.obstacles.push(...nextSegment);
           }
           if (eng.obstacles.length > 50 && eng.obstacles[0].x - eng.worldX < -500) {
@@ -888,9 +898,12 @@ export const GeometryDashGame: React.FC<{
             }
             // Jump Pad
             else if (obs.type === 'PAD') {
-              if (pRight > sx && pLeft < sx + obs.w && pBottom >= obsLocalY && pTop <= obsLocalY + obs.h && !obs.triggered) {
-                obs.triggered = true;
-                p.vy = -16.0;
+              const isP2 = name === 'P2';
+              const isTriggered = isP2 ? obs.triggeredP2 : obs.triggeredP1;
+              if (pRight > sx && pLeft < sx + obs.w && pBottom >= obsLocalY && pTop <= obsLocalY + obs.h && !isTriggered) {
+                if (isP2) obs.triggeredP2 = true;
+                else obs.triggeredP1 = true;
+                p.vy = -14.0;
                 p.isGrounded = false;
                 sound.playPad();
                 spawnExplosion(sx + obs.w / 2, obsLocalY + trackYOffset, '#FACC15');
@@ -898,14 +911,17 @@ export const GeometryDashGame: React.FC<{
             }
             // Air Orb
             else if (obs.type === 'ORB') {
+              const isP2 = name === 'P2';
+              const isTriggered = isP2 ? obs.triggeredP2 : obs.triggeredP1;
               const orbCenterX = sx + obs.w / 2;
               const orbCenterY = obsLocalY + obs.h / 2;
               const dist = Math.hypot(px + pSize / 2 - orbCenterX, py + pSize / 2 - orbCenterY);
               const isClicking = p.jumpBufferTimer > 0 || p.holdingJump;
 
-              if (dist < 52 && isClicking && !obs.triggered) {
-                obs.triggered = true;
-                p.vy = activeView === 'SOLO' ? -10.8 : -10.2;
+              if (dist < 52 && isClicking && !isTriggered) {
+                if (isP2) obs.triggeredP2 = true;
+                else obs.triggeredP1 = true;
+                p.vy = -9.5;
                 p.jumpBufferTimer = 0;
                 p.isGrounded = false;
                 sound.playOrb();
@@ -2098,6 +2114,36 @@ export const GeometryDashGame: React.FC<{
           }
         }}
         onMouseUp={() => {
+          if (activeView === 'SOLO') releaseSoloJump();
+          else if (activeView === 'LOCAL_DUAL') {
+            releaseP1Jump();
+            releaseP2Jump();
+          } else if (activeView === 'ONLINE_GAME') {
+            if (myOnlineSlot === 'P1') releaseP1Jump();
+            else releaseP2Jump();
+          }
+        }}
+        onTouchStart={(e) => {
+          if (gameState === 'PLAYING') {
+            const touch = e.touches[0];
+            if (touch) {
+              const rect = canvasRef.current?.getBoundingClientRect();
+              if (rect) {
+                const touchY = touch.clientY - rect.top;
+                if (activeView === 'SOLO') {
+                  triggerSoloJump();
+                } else if (activeView === 'LOCAL_DUAL') {
+                  if (touchY < rect.height / 2) triggerP1Jump();
+                  else triggerP2Jump();
+                } else if (activeView === 'ONLINE_GAME') {
+                  if (myOnlineSlot === 'P1') triggerP1Jump();
+                  else triggerP2Jump();
+                }
+              }
+            }
+          }
+        }}
+        onTouchEnd={() => {
           if (activeView === 'SOLO') releaseSoloJump();
           else if (activeView === 'LOCAL_DUAL') {
             releaseP1Jump();

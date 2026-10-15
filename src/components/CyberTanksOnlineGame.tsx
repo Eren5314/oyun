@@ -17,39 +17,22 @@ import {
   PlusCircle,
   Link,
   Radio,
+  Gamepad2,
 } from 'lucide-react';
 import { sound } from '../utils/sound';
 
-// =========================================================================
-// TYPES & INTERFACES
-// =========================================================================
-export interface TankPlayerInfo {
-  id: string;
-  name: string;
-  slot: 'P1' | 'P2';
-  ready: boolean;
-  score: number;
-  lives: number;
-}
+const ARENA_W = 800;
+const ARENA_H = 520;
+const TANK_RADIUS = 18;
 
-export interface TankRoomData {
-  code: string;
-  status: 'LOBBY' | 'COUNTDOWN' | 'BATTLE' | 'ROUND_OVER' | 'MATCH_OVER';
-  round: number;
-  winner: 'P1' | 'P2' | null;
-  roundWinner: 'P1' | 'P2' | null;
-  mapSeed: number;
-  players: TankPlayerInfo[];
-  countdown?: number;
-}
-
-interface Obstacle {
+interface TankState {
   x: number;
   y: number;
-  w: number;
-  h: number;
-  type: 'WALL' | 'PILLAR' | 'BOX';
-  health?: number;
+  angle: number; // Tank body & turret angle for intuitive arcade steering
+  speed: number;
+  lives: number;
+  score: number;
+  recoil: number;
 }
 
 interface Bullet {
@@ -63,28 +46,21 @@ interface Bullet {
   color: string;
 }
 
-interface Particle {
+interface Obstacle {
   x: number;
   y: number;
-  vx: number;
-  vy: number;
-  color: string;
-  size: number;
-  alpha: number;
-  life: number;
+  w: number;
+  h: number;
+  type: 'WALL' | 'PILLAR' | 'BOX';
 }
 
-interface PowerUp {
-  x: number;
-  y: number;
-  type: 'SHIELD' | 'SPEED' | 'TRIPLE';
-  duration: number;
-}
-
-// Arena dimensions
-const ARENA_W = 800;
-const ARENA_H = 520;
-const TANK_RADIUS = 18;
+const OBSTACLES: Obstacle[] = [
+  { x: 240, y: 120, w: 90, h: 80, type: 'WALL' },
+  { x: 470, y: 120, w: 90, h: 80, type: 'WALL' },
+  { x: 240, y: 320, w: 90, h: 80, type: 'WALL' },
+  { x: 470, y: 320, w: 90, h: 80, type: 'WALL' },
+  { x: 370, y: 230, w: 60, h: 60, type: 'PILLAR' },
+];
 
 export const CyberTanksOnlineGame: React.FC<{
   onScoreUpdate: (id: string, s: number) => void;
@@ -92,1304 +68,578 @@ export const CyberTanksOnlineGame: React.FC<{
 }> = ({ onScoreUpdate, playerName }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Networking state
-  const [matchMode, setMatchMode] = useState<'QUICK' | 'CUSTOM'>('CUSTOM');
-  const [roomCodeInput, setRoomCodeInput] = useState('TANK1');
+  // Game Mode: SOLO (vs AI), LOCAL_2P (Same keyboard), or ONLINE
+  const [playMode, setPlayMode] = useState<'SOLO' | 'LOCAL_2P' | 'ONLINE'>('SOLO');
   const [currentRoomCode, setCurrentRoomCode] = useState('TANK1');
-  const [isConnected, setIsConnected] = useState(false);
-  const [isSearchingQuick, setIsSearchingQuick] = useState(false);
-  const [roomData, setRoomData] = useState<TankRoomData | null>(null);
-  const [copiedCode, setCopiedCode] = useState(false);
-  const [copiedLink, setCopiedLink] = useState(false);
-  const [myPlayerId] = useState(() => 'TK_' + Math.random().toString(36).substring(2, 8).toUpperCase());
-  const [isBotEnabled, setIsBotEnabled] = useState(false);
-  const [floatingEmoji, setFloatingEmoji] = useState<{ emoji: string; id: number } | null>(null);
+  const [scores, setScores] = useState({ p1: 0, p2: 0 });
+  const [roundWinner, setRoundWinner] = useState<'P1' | 'P2' | null>(null);
+  const [p1Lives, setP1Lives] = useState(3);
+  const [p2Lives, setP2Lives] = useState(3);
 
-  const myTankName = playerName || 'Tankçı ' + myPlayerId.slice(3, 7);
-
-  // Local game state for rendering and animation loop
-  const gameStateRef = useRef({
-    status: 'LOBBY' as TankRoomData['status'],
-    round: 1,
-    countdownVal: 0,
+  // Local game engine ref for SOLO and LOCAL_2P
+  const gameRef = useRef({
     p1: {
-      x: 120,
+      x: 100,
       y: 260,
-      bodyAngle: 0,
-      turretAngle: 0,
-      vx: 0,
-      vy: 0,
-      speed: 3.2,
+      angle: 0,
+      speed: 3.5,
       lives: 3,
-      hasShield: false,
-      powerup: null as 'SPEED' | 'TRIPLE' | null,
-      powerupTimer: 0,
       score: 0,
       recoil: 0,
-    },
+    } as TankState,
     p2: {
-      x: 680,
+      x: 700,
       y: 260,
-      bodyAngle: Math.PI,
-      turretAngle: Math.PI,
-      vx: 0,
-      vy: 0,
-      speed: 3.2,
+      angle: Math.PI,
+      speed: 3.5,
       lives: 3,
-      hasShield: false,
-      powerup: null as 'SPEED' | 'TRIPLE' | null,
-      powerupTimer: 0,
       score: 0,
       recoil: 0,
-    },
+    } as TankState,
+    bullets: [] as Bullet[],
     keys: {
       w: false,
       a: false,
       s: false,
       d: false,
-      up: false,
-      left: false,
-      down: false,
-      right: false,
       space: false,
+      up: false,
+      down: false,
+      left: false,
+      right: false,
+      enter: false,
     },
-    mousePos: { x: 400, y: 260 },
-    obstacles: [] as Obstacle[],
-    bullets: [] as Bullet[],
-    particles: [] as Particle[],
-    powerups: [] as PowerUp[],
-    powerupSpawnTimer: 300,
-    lastFireTime: 0,
-    fireCooldown: 280, // ms
-    botLastFire: 0,
-    botMoveTimer: 0,
-    botTargetAngle: 0,
-    botTargetX: 680,
-    botTargetY: 260,
+    lastShotP1: 0,
+    lastShotP2: 0,
   });
 
-  const wsRef = useRef<WebSocket | null>(null);
+  const handleModeChange = (mode: 'SOLO' | 'LOCAL_2P' | 'ONLINE') => {
+    setPlayMode(mode);
+    sound.playScore();
+    resetLocalGame();
+  };
 
-  // Current player slot: 'P1' (Blue/Cyan) or 'P2' (Red/Orange)
-  const mySlot = roomData?.players.find((p) => p.id === myPlayerId)?.slot || 'P1';
-
-  // Build arena map barriers
-  const generateMap = useCallback((seed: number = 42) => {
-    const obs: Obstacle[] = [
-      // Outer border walls
-      { x: 0, y: 0, w: ARENA_W, h: 12, type: 'WALL' },
-      { x: 0, y: ARENA_H - 12, w: ARENA_W, h: 12, type: 'WALL' },
-      { x: 0, y: 0, w: 12, h: ARENA_H, type: 'WALL' },
-      { x: ARENA_W - 12, y: 0, w: 12, h: ARENA_H, type: 'WALL' },
-
-      // Central tactical barriers
-      { x: 385, y: 70, w: 30, h: 110, type: 'PILLAR' },
-      { x: 385, y: ARENA_H - 180, w: 30, h: 110, type: 'PILLAR' },
-      { x: 370, y: 245, w: 60, h: 30, type: 'PILLAR' },
-
-      // Left Base Cover
-      { x: 220, y: 150, w: 25, h: 90, type: 'WALL' },
-      { x: 220, y: 280, w: 25, h: 90, type: 'WALL' },
-
-      // Right Base Cover
-      { x: 555, y: 150, w: 25, h: 90, type: 'WALL' },
-      { x: 555, y: 280, w: 25, h: 90, type: 'WALL' },
-
-      // Corner tactical boxes
-      { x: 140, y: 60, w: 40, h: 40, type: 'BOX', health: 3 },
-      { x: 140, y: ARENA_H - 100, w: 40, h: 40, type: 'BOX', health: 3 },
-      { x: 620, y: 60, w: 40, h: 40, type: 'BOX', health: 3 },
-      { x: 620, y: ARENA_H - 100, w: 40, h: 40, type: 'BOX', health: 3 },
-    ];
-    return obs;
-  }, []);
-
-  // Connect to WebSocket room
-  const connectWs = useCallback(
-    (action: 'QUICK' | 'CUSTOM', code: string) => {
-      if (wsRef.current) {
-        try {
-          wsRef.current.close();
-        } catch {}
-      }
-
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws`;
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        setIsConnected(true);
-        if (action === 'QUICK') {
-          setIsSearchingQuick(true);
-          ws.send(
-            JSON.stringify({
-              type: 'TANK_QUICK_MATCH',
-              playerId: myPlayerId,
-              name: myTankName,
-            })
-          );
-        } else {
-          setIsSearchingQuick(false);
-          ws.send(
-            JSON.stringify({
-              type: 'TANK_JOIN_ROOM',
-              code,
-              playerId: myPlayerId,
-              name: myTankName,
-            })
-          );
-        }
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-
-          if (msg.type === 'TANK_QUEUE_WAITING') {
-            setIsSearchingQuick(true);
-          } else if (msg.type === 'TANK_ROOM_UPDATE') {
-            setIsSearchingQuick(false);
-            setRoomData(msg);
-            setCurrentRoomCode(msg.code);
-            const st = gameStateRef.current;
-            st.status = msg.status;
-            st.round = msg.round;
-
-            if (msg.countdown !== undefined) {
-              st.countdownVal = msg.countdown;
-              sound.playOrb();
-            }
-
-            if (msg.winner) {
-              sound.playVictory();
-              const myP = msg.players.find((p: TankPlayerInfo) => p.id === myPlayerId);
-              if (myP) {
-                onScoreUpdate('cyber-tanks', myP.score * 100);
-              }
-            }
-
-            // Sync scores
-            const p1Data = msg.players.find((p: TankPlayerInfo) => p.slot === 'P1');
-            const p2Data = msg.players.find((p: TankPlayerInfo) => p.slot === 'P2');
-            if (p1Data) st.p1.score = p1Data.score;
-            if (p2Data) st.p2.score = p2Data.score;
-          } else if (msg.type === 'TANK_OPPONENT_POS') {
-            // Update opponent position
-            const opp = mySlot === 'P1' ? gameStateRef.current.p2 : gameStateRef.current.p1;
-            opp.x = msg.x;
-            opp.y = msg.y;
-            opp.bodyAngle = msg.bodyAngle;
-            opp.turretAngle = msg.turretAngle;
-            opp.speed = msg.speed;
-            opp.lives = msg.lives;
-            opp.hasShield = msg.hasShield;
-            opp.powerup = msg.powerup;
-          } else if (msg.type === 'TANK_OPPONENT_BULLET') {
-            // Receive bullet from opponent
-            const oppSlot = mySlot === 'P1' ? 'P2' : 'P1';
-            gameStateRef.current.bullets.push({
-              id: msg.id,
-              x: msg.x,
-              y: msg.y,
-              vx: msg.vx,
-              vy: msg.vy,
-              bounces: msg.bounces,
-              owner: oppSlot,
-              color: oppSlot === 'P1' ? '#38BDF8' : '#F97316',
-            });
-            sound.playLaser();
-          } else if (msg.type === 'TANK_EMOJI_RELAY') {
-            setFloatingEmoji({ emoji: msg.emoji, id: Date.now() });
-            setTimeout(() => setFloatingEmoji(null), 2000);
-            sound.playPop();
-          }
-        } catch {}
-      };
-
-      ws.onclose = () => {
-        setIsConnected(false);
-      };
-      ws.onerror = () => setIsConnected(false);
-    },
-    [myPlayerId, mySlot, myTankName, onScoreUpdate]
-  );
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const roomParam = params.get('room');
-    if (roomParam) {
-      setRoomCodeInput(roomParam);
-      setCurrentRoomCode(roomParam);
-      connectWs('CUSTOM', roomParam);
-    } else {
-      connectWs('CUSTOM', currentRoomCode);
-    }
-
-    return () => {
-      if (wsRef.current) wsRef.current.close();
+  const resetLocalGame = () => {
+    gameRef.current.p1 = {
+      x: 100,
+      y: 260,
+      angle: 0,
+      speed: 3.5,
+      lives: 3,
+      score: scores.p1,
+      recoil: 0,
     };
-  }, []);
-
-  // Reset arena state for new round
-  const resetRoundArena = useCallback(() => {
-    const st = gameStateRef.current;
-    st.p1.x = 120;
-    st.p1.y = 260;
-    st.p1.bodyAngle = 0;
-    st.p1.turretAngle = 0;
-    st.p1.lives = 3;
-    st.p1.hasShield = false;
-    st.p1.powerup = null;
-
-    st.p2.x = 680;
-    st.p2.y = 260;
-    st.p2.bodyAngle = Math.PI;
-    st.p2.turretAngle = Math.PI;
-    st.p2.lives = 3;
-    st.p2.hasShield = false;
-    st.p2.powerup = null;
-
-    st.bullets = [];
-    st.powerups = [];
-    st.obstacles = generateMap(st.round);
-  }, [generateMap]);
-
-  // Send ready toggle
-  const toggleReady = () => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'TANK_TOGGLE_READY' }));
-      sound.playPop();
-    }
+    gameRef.current.p2 = {
+      x: 700,
+      y: 260,
+      angle: Math.PI,
+      speed: 3.5,
+      lives: 3,
+      score: scores.p2,
+      recoil: 0,
+    };
+    gameRef.current.bullets = [];
+    setP1Lives(3);
+    setP2Lives(3);
+    setRoundWinner(null);
   };
 
-  // Send reaction emoji
-  const sendEmoji = (emoji: string) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'TANK_EMOJI', emoji }));
-      setFloatingEmoji({ emoji, id: Date.now() });
-      setTimeout(() => setFloatingEmoji(null), 2000);
-      sound.playPop();
-    }
-  };
-
-  // Keyboard and Mouse Event Listeners
+  // Keyboard Listeners
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const k = e.key.toLowerCase();
-      const keys = gameStateRef.current.keys;
-      if (k === 'w') keys.w = true;
-      if (k === 'a') keys.a = true;
-      if (k === 's') keys.s = true;
-      if (k === 'd') keys.d = true;
-      if (e.key === 'ArrowUp') keys.up = true;
-      if (e.key === 'ArrowLeft') keys.left = true;
-      if (e.key === 'ArrowDown') keys.down = true;
-      if (e.key === 'ArrowRight') keys.right = true;
-      if (e.key === ' ' || k === 'space') {
-        keys.space = true;
+      const k = gameRef.current.keys;
+      if (e.key === 'w' || e.key === 'W') k.w = true;
+      if (e.key === 'a' || e.key === 'A') k.a = true;
+      if (e.key === 's' || e.key === 'S') k.s = true;
+      if (e.key === 'd' || e.key === 'D') k.d = true;
+      if (e.key === ' ') {
+        k.space = true;
+        e.preventDefault();
+      }
+
+      if (e.key === 'ArrowUp') {
+        k.up = true;
+        e.preventDefault();
+      }
+      if (e.key === 'ArrowDown') {
+        k.down = true;
+        e.preventDefault();
+      }
+      if (e.key === 'ArrowLeft') k.left = true;
+      if (e.key === 'ArrowRight') k.right = true;
+      if (e.key === 'Enter') {
+        k.enter = true;
         e.preventDefault();
       }
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
-      const k = e.key.toLowerCase();
-      const keys = gameStateRef.current.keys;
-      if (k === 'w') keys.w = false;
-      if (k === 'a') keys.a = false;
-      if (k === 's') keys.s = false;
-      if (k === 'd') keys.d = false;
-      if (e.key === 'ArrowUp') keys.up = false;
-      if (e.key === 'ArrowLeft') keys.left = false;
-      if (e.key === 'ArrowDown') keys.down = false;
-      if (e.key === 'ArrowRight') keys.right = false;
-      if (e.key === ' ' || k === 'space') keys.space = false;
-    };
+      const k = gameRef.current.keys;
+      if (e.key === 'w' || e.key === 'W') k.w = false;
+      if (e.key === 'a' || e.key === 'A') k.a = false;
+      if (e.key === 's' || e.key === 'S') k.s = false;
+      if (e.key === 'd' || e.key === 'D') k.d = false;
+      if (e.key === ' ') k.space = false;
 
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!canvasRef.current) return;
-      const rect = canvasRef.current.getBoundingClientRect();
-      const scaleX = ARENA_W / rect.width;
-      const scaleY = ARENA_H / rect.height;
-      gameStateRef.current.mousePos.x = (e.clientX - rect.left) * scaleX;
-      gameStateRef.current.mousePos.y = (e.clientY - rect.top) * scaleY;
-    };
-
-    const handleMouseDown = (e: MouseEvent) => {
-      if (e.button === 0) {
-        firePlayerBullet();
-      }
+      if (e.key === 'ArrowUp') k.up = false;
+      if (e.key === 'ArrowDown') k.down = false;
+      if (e.key === 'ArrowLeft') k.left = false;
+      if (e.key === 'ArrowRight') k.right = false;
+      if (e.key === 'Enter') k.enter = false;
     };
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
-    const cvs = canvasRef.current;
-    if (cvs) {
-      cvs.addEventListener('mousemove', handleMouseMove);
-      cvs.addEventListener('mousedown', handleMouseDown);
-    }
-
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
-      if (cvs) {
-        cvs.removeEventListener('mousemove', handleMouseMove);
-        cvs.removeEventListener('mousedown', handleMouseDown);
-      }
     };
   }, []);
 
-  // Fire bullet for current player
-  const firePlayerBullet = () => {
-    const st = gameStateRef.current;
-    if (st.status !== 'BATTLE') return;
-
-    const now = Date.now();
-    if (now - st.lastFireTime < st.fireCooldown) return;
-    st.lastFireTime = now;
-
-    const me = mySlot === 'P1' ? st.p1 : st.p2;
-    me.recoil = 6;
-
-    const speed = 7.5;
-    const angles = me.powerup === 'TRIPLE' ? [me.turretAngle - 0.22, me.turretAngle, me.turretAngle + 0.22] : [me.turretAngle];
-
-    angles.forEach((ang) => {
-      const vx = Math.cos(ang) * speed;
-      const vy = Math.sin(ang) * speed;
-      const spawnX = me.x + Math.cos(ang) * (TANK_RADIUS + 8);
-      const spawnY = me.y + Math.sin(ang) * (TANK_RADIUS + 8);
-      const bId = mySlot + '_' + Math.random().toString(36).substring(2, 7);
-
-      st.bullets.push({
-        id: bId,
-        x: spawnX,
-        y: spawnY,
-        vx,
-        vy,
-        bounces: 0,
-        owner: mySlot,
-        color: mySlot === 'P1' ? '#38BDF8' : '#F97316',
-      });
-
-      // Relay bullet to server
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'TANK_FIRE_BULLET',
-            id: bId,
-            x: spawnX,
-            y: spawnY,
-            vx,
-            vy,
-            bounces: 0,
-            isSpecial: me.powerup === 'TRIPLE',
-          })
-        );
+  // Collision Helper for Tanks against Arena & Obstacles
+  const checkCollision = (nx: number, ny: number) => {
+    // Arena bounds
+    if (nx - TANK_RADIUS < 10 || nx + TANK_RADIUS > ARENA_W - 10 || ny - TANK_RADIUS < 10 || ny + TANK_RADIUS > ARENA_H - 10) {
+      return true;
+    }
+    // Obstacles
+    for (const obs of OBSTACLES) {
+      if (
+        nx + TANK_RADIUS > obs.x &&
+        nx - TANK_RADIUS < obs.x + obs.w &&
+        ny + TANK_RADIUS > obs.y &&
+        ny - TANK_RADIUS < obs.y + obs.h
+      ) {
+        return true;
       }
-    });
-
-    sound.playLaser();
+    }
+    return false;
   };
 
-  // Main 60 FPS Game Loop
+  // Main Game Loop for SOLO & LOCAL_2P
   useEffect(() => {
+    if (playMode === 'ONLINE') return;
+
+    let animId: number;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    gameStateRef.current.obstacles = generateMap();
-
-    let animId: number;
-    let syncTimer = 0;
-    let countdownTimer = 0;
+    const game = gameRef.current;
 
     const updateGame = () => {
-      const st = gameStateRef.current;
+      const now = Date.now();
+      const p1 = game.p1;
+      const p2 = game.p2;
+      const k = game.keys;
 
-      // Handle countdown timer transition to BATTLE
-      if (st.status === 'COUNTDOWN') {
-        countdownTimer++;
-        if (countdownTimer % 60 === 0) {
-          if (st.countdownVal > 1) {
-            st.countdownVal--;
-            sound.playOrb();
-          } else {
-            st.status = 'BATTLE';
-            resetRoundArena();
-            sound.playSpeedPortal(2);
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({ type: 'TANK_START_BATTLE' }));
-            }
-          }
-        }
-      }
+      if (!roundWinner) {
+        // --- P1 Control (WASD: A/D rotate, W/S forward/backward) ---
+        if (k.a) p1.angle -= 0.06;
+        if (k.d) p1.angle += 0.06;
 
-      // If BATTLE status, run physics
-      if (st.status === 'BATTLE') {
-        const me = mySlot === 'P1' ? st.p1 : st.p2;
-        const keys = st.keys;
+        let p1Move = 0;
+        if (k.w) p1Move += p1.speed;
+        if (k.s) p1Move -= p1.speed * 0.6;
 
-        // Calculate input velocity
-        let moveX = 0;
-        let moveY = 0;
-        if (keys.w || keys.up) moveY -= 1;
-        if (keys.s || keys.down) moveY += 1;
-        if (keys.a || keys.left) moveX -= 1;
-        if (keys.d || keys.right) moveX += 1;
-
-        if (keys.space) {
-          firePlayerBullet();
+        if (p1Move !== 0) {
+          const nx = p1.x + Math.cos(p1.angle) * p1Move;
+          const ny = p1.y + Math.sin(p1.angle) * p1Move;
+          if (!checkCollision(nx, p1.y)) p1.x = nx;
+          if (!checkCollision(p1.x, ny)) p1.y = ny;
         }
 
-        // Normalize movement
-        const curSpeed = me.powerup === 'SPEED' ? 5.2 : 3.4;
-        if (moveX !== 0 || moveY !== 0) {
-          const len = Math.hypot(moveX, moveY);
-          const nx = (moveX / len) * curSpeed;
-          const ny = (moveY / len) * curSpeed;
-
-          // Attempt movement with obstacle collision
-          const nextX = me.x + nx;
-          const nextY = me.y + ny;
-
-          let collideX = false;
-          let collideY = false;
-
-          for (const obs of st.obstacles) {
-            // Check bounding box + circle collision
-            if (
-              nextX + TANK_RADIUS > obs.x &&
-              nextX - TANK_RADIUS < obs.x + obs.w &&
-              me.y + TANK_RADIUS > obs.y &&
-              me.y - TANK_RADIUS < obs.y + obs.h
-            ) {
-              collideX = true;
-            }
-            if (
-              me.x + TANK_RADIUS > obs.x &&
-              me.x - TANK_RADIUS < obs.x + obs.w &&
-              nextY + TANK_RADIUS > obs.y &&
-              nextY - TANK_RADIUS < obs.y + obs.h
-            ) {
-              collideY = true;
-            }
-          }
-
-          if (!collideX) me.x = nextX;
-          if (!collideY) me.y = nextY;
-
-          // Update body angle smoothly
-          const targetBodyAngle = Math.atan2(ny, nx);
-          let diff = targetBodyAngle - me.bodyAngle;
-          while (diff < -Math.PI) diff += Math.PI * 2;
-          while (diff > Math.PI) diff -= Math.PI * 2;
-          me.bodyAngle += diff * 0.15;
+        // P1 Shoot (Space)
+        if (k.space && now - game.lastShotP1 > 350) {
+          game.lastShotP1 = now;
+          p1.recoil = 8;
+          sound.playLaser();
+          const spawnX = p1.x + Math.cos(p1.angle) * 26;
+          const spawnY = p1.y + Math.sin(p1.angle) * 26;
+          game.bullets.push({
+            id: 'B_' + Math.random(),
+            x: spawnX,
+            y: spawnY,
+            vx: Math.cos(p1.angle) * 7.5,
+            vy: Math.sin(p1.angle) * 7.5,
+            bounces: 0,
+            owner: 'P1',
+            color: '#3B82F6',
+          });
         }
 
-        // Aim Turret at mouse
-        const aimDx = st.mousePos.x - me.x;
-        const aimDy = st.mousePos.y - me.y;
-        me.turretAngle = Math.atan2(aimDy, aimDx);
+        // --- P2 Control ---
+        if (playMode === 'LOCAL_2P') {
+          if (k.left) p2.angle -= 0.06;
+          if (k.right) p2.angle += 0.06;
 
-        if (me.recoil > 0) me.recoil *= 0.85;
+          let p2Move = 0;
+          if (k.up) p2Move += p2.speed;
+          if (k.down) p2Move -= p2.speed * 0.6;
 
-        // Powerup timers
-        if (me.powerupTimer > 0) {
-          me.powerupTimer--;
-          if (me.powerupTimer <= 0) me.powerup = null;
-        }
-
-        // AI Bot logic if active
-        if (isBotEnabled) {
-          const bot = mySlot === 'P1' ? st.p2 : st.p1;
-          const playerTarget = me;
-
-          st.botMoveTimer++;
-          if (st.botMoveTimer % 45 === 0) {
-            // Pick a strategic patrol position near player
-            const randAng = Math.random() * Math.PI * 2;
-            const randDist = 180 + Math.random() * 120;
-            st.botTargetX = Math.max(80, Math.min(ARENA_W - 80, playerTarget.x + Math.cos(randAng) * randDist));
-            st.botTargetY = Math.max(80, Math.min(ARENA_H - 80, playerTarget.y + Math.sin(randAng) * randDist));
+          if (p2Move !== 0) {
+            const nx = p2.x + Math.cos(p2.angle) * p2Move;
+            const ny = p2.y + Math.sin(p2.angle) * p2Move;
+            if (!checkCollision(nx, p2.y)) p2.x = nx;
+            if (!checkCollision(p2.x, ny)) p2.y = ny;
           }
 
-          const botDx = st.botTargetX - bot.x;
-          const botDy = st.botTargetY - bot.y;
-          const botDist = Math.hypot(botDx, botDy);
-          if (botDist > 20) {
-            const bvx = (botDx / botDist) * 2.8;
-            const bvy = (botDy / botDist) * 2.8;
-            bot.x += bvx;
-            bot.y += bvy;
-            bot.bodyAngle = Math.atan2(bvy, bvx);
-          }
-
-          // Bot aim & fire
-          const targetDx = playerTarget.x - bot.x;
-          const targetDy = playerTarget.y - bot.y;
-          bot.turretAngle = Math.atan2(targetDy, targetDx);
-
-          const nowTime = Date.now();
-          if (nowTime - st.botLastFire > 1100 && Math.random() < 0.25) {
-            st.botLastFire = nowTime;
-            const bvx = Math.cos(bot.turretAngle) * 7.5;
-            const bvy = Math.sin(bot.turretAngle) * 7.5;
-            st.bullets.push({
-              id: 'BOT_' + Math.random().toString(36).substring(2, 6),
-              x: bot.x + Math.cos(bot.turretAngle) * (TANK_RADIUS + 8),
-              y: bot.y + Math.sin(bot.turretAngle) * (TANK_RADIUS + 8),
-              vx: bvx,
-              vy: bvy,
-              bounces: 0,
-              owner: mySlot === 'P1' ? 'P2' : 'P1',
-              color: mySlot === 'P1' ? '#F97316' : '#38BDF8',
-            });
+          if (k.enter && now - game.lastShotP2 > 350) {
+            game.lastShotP2 = now;
+            p2.recoil = 8;
             sound.playLaser();
+            const spawnX = p2.x + Math.cos(p2.angle) * 26;
+            const spawnY = p2.y + Math.sin(p2.angle) * 26;
+            game.bullets.push({
+              id: 'B_' + Math.random(),
+              x: spawnX,
+              y: spawnY,
+              vx: Math.cos(p2.angle) * 7.5,
+              vy: Math.sin(p2.angle) * 7.5,
+              bounces: 0,
+              owner: 'P2',
+              color: '#F43F5E',
+            });
           }
-        }
+        } else {
+          // --- SOLO AI Bot Tank Logic ---
+          const dx = p1.x - p2.x;
+          const dy = p1.y - p2.y;
+          const targetAngle = Math.atan2(dy, dx);
+          
+          // Smoothly rotate towards P1
+          const angleDiff = Math.atan2(Math.sin(targetAngle - p2.angle), Math.cos(targetAngle - p2.angle));
+          p2.angle += Math.sign(angleDiff) * Math.min(Math.abs(angleDiff), 0.04);
 
-        // Bullets physics & bouncing
-        for (let i = st.bullets.length - 1; i >= 0; i--) {
-          const b = st.bullets[i];
-          b.x += b.vx;
-          b.y += b.vy;
+          const distToP1 = Math.hypot(dx, dy);
+          let botMove = 0;
+          if (distToP1 > 180) botMove = p2.speed * 0.8;
+          else if (distToP1 < 110) botMove = -p2.speed * 0.6;
 
-          // Check collision with obstacles
-          let bounced = false;
-          for (const obs of st.obstacles) {
-            if (b.x >= obs.x && b.x <= obs.x + obs.w && b.y >= obs.y && b.y <= obs.y + obs.h) {
-              // Determine bounce surface (horizontal or vertical)
-              const overlapLeft = Math.abs(b.x - obs.x);
-              const overlapRight = Math.abs(b.x - (obs.x + obs.w));
-              const overlapTop = Math.abs(b.y - obs.y);
-              const overlapBottom = Math.abs(b.y - (obs.y + obs.h));
-
-              const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
-              if (minOverlap === overlapLeft || minOverlap === overlapRight) {
-                b.vx = -b.vx;
-              } else {
-                b.vy = -b.vy;
-              }
-
-              b.bounces++;
-              bounced = true;
-
-              // Spark particles
-              for (let p = 0; p < 4; p++) {
-                st.particles.push({
-                  x: b.x,
-                  y: b.y,
-                  vx: (Math.random() - 0.5) * 4,
-                  vy: (Math.random() - 0.5) * 4,
-                  color: b.color,
-                  size: 2.5,
-                  alpha: 1,
-                  life: 15,
-                });
-              }
-              sound.playBounce();
-              break;
-            }
+          if (botMove !== 0) {
+            const nx = p2.x + Math.cos(p2.angle) * botMove;
+            const ny = p2.y + Math.sin(p2.angle) * botMove;
+            if (!checkCollision(nx, p2.y)) p2.x = nx;
+            if (!checkCollision(p2.x, ny)) p2.y = ny;
           }
 
-          // If reached max bounces (2 bounces max)
-          if (b.bounces > 2) {
-            st.bullets.splice(i, 1);
-            continue;
-          }
-
-          // Bullet hits Tank Check (Only your own tank hit detection to avoid duplicate damage)
-          const targetTank = me;
-          const hitDist = Math.hypot(b.x - targetTank.x, b.y - targetTank.y);
-
-          // Can only get hit if bullet is opponent's OR has bounced at least once (ricochet self-damage)
-          const canHit = b.owner !== mySlot || b.bounces > 0;
-          if (canHit && hitDist < TANK_RADIUS + 3) {
-            st.bullets.splice(i, 1);
-
-            if (targetTank.hasShield) {
-              targetTank.hasShield = false;
-              sound.playShield();
-              // Shield sparks
-              for (let p = 0; p < 12; p++) {
-                st.particles.push({
-                  x: targetTank.x,
-                  y: targetTank.y,
-                  vx: (Math.random() - 0.5) * 6,
-                  vy: (Math.random() - 0.5) * 6,
-                  color: '#60A5FA',
-                  size: 3,
-                  alpha: 1,
-                  life: 20,
-                });
-              }
-            } else {
-              targetTank.lives--;
-              sound.playExplosion();
-
-              // Explosion particles
-              for (let p = 0; p < 25; p++) {
-                st.particles.push({
-                  x: targetTank.x,
-                  y: targetTank.y,
-                  vx: (Math.random() - 0.5) * 8,
-                  vy: (Math.random() - 0.5) * 8,
-                  color: '#F43F5E',
-                  size: 4,
-                  alpha: 1,
-                  life: 25,
-                });
-              }
-
-              // Send hit report to server
-              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                wsRef.current.send(
-                  JSON.stringify({
-                    type: 'TANK_HIT',
-                    lives: targetTank.lives,
-                  })
-                );
-              }
-            }
-            continue;
-          }
-        }
-
-        // Powerups spawn and pickup
-        st.powerupSpawnTimer--;
-        if (st.powerupSpawnTimer <= 0) {
-          st.powerupSpawnTimer = 450 + Math.floor(Math.random() * 300);
-          if (st.powerups.length < 2) {
-            const types: Array<'SHIELD' | 'SPEED' | 'TRIPLE'> = ['SHIELD', 'SPEED', 'TRIPLE'];
-            const randType = types[Math.floor(Math.random() * types.length)];
-            st.powerups.push({
-              x: 180 + Math.random() * (ARENA_W - 360),
-              y: 120 + Math.random() * (ARENA_H - 240),
-              type: randType,
-              duration: 400,
+          // Bot shoot
+          if (now - game.lastShotP2 > 900 && distToP1 < 480 && Math.abs(angleDiff) < 0.5) {
+            game.lastShotP2 = now;
+            p2.recoil = 8;
+            sound.playLaser();
+            const spawnX = p2.x + Math.cos(p2.angle) * 26;
+            const spawnY = p2.y + Math.sin(p2.angle) * 26;
+            game.bullets.push({
+              id: 'B_' + Math.random(),
+              x: spawnX,
+              y: spawnY,
+              vx: Math.cos(p2.angle) * 7.0,
+              vy: Math.sin(p2.angle) * 7.0,
+              bounces: 0,
+              owner: 'P2',
+              color: '#F43F5E',
             });
           }
         }
+      }
 
-        // Pickup check for local player
-        for (let pIdx = st.powerups.length - 1; pIdx >= 0; pIdx--) {
-          const pup = st.powerups[pIdx];
-          const dist = Math.hypot(me.x - pup.x, me.y - pup.y);
-          if (dist < TANK_RADIUS + 15) {
-            if (pup.type === 'SHIELD') me.hasShield = true;
-            if (pup.type === 'SPEED') {
-              me.powerup = 'SPEED';
-              me.powerupTimer = 350;
-            }
-            if (pup.type === 'TRIPLE') {
-              me.powerup = 'TRIPLE';
-              me.powerupTimer = 350;
-            }
-            st.powerups.splice(pIdx, 1);
-            sound.playScore();
+      if (p1.recoil > 0) p1.recoil *= 0.85;
+      if (p2.recoil > 0) p2.recoil *= 0.85;
+
+      // Update Bullets & Bounces
+      for (let i = game.bullets.length - 1; i >= 0; i--) {
+        const b = game.bullets[i];
+        b.x += b.vx;
+        b.y += b.vy;
+
+        // Wall bounces
+        if (b.x <= 10 || b.x >= ARENA_W - 10) {
+          b.vx *= -1;
+          b.bounces++;
+          sound.playPop();
+        }
+        if (b.y <= 10 || b.y >= ARENA_H - 10) {
+          b.vy *= -1;
+          b.bounces++;
+          sound.playPop();
+        }
+
+        // Obstacle bounces
+        let hitObs = false;
+        for (const obs of OBSTACLES) {
+          if (b.x >= obs.x && b.x <= obs.x + obs.w && b.y >= obs.y && b.y <= obs.y + obs.h) {
+            // Determine bounce axis
+            const prevX = b.x - b.vx;
+            const prevY = b.y - b.vy;
+            if (prevX < obs.x || prevX > obs.x + obs.w) b.vx *= -1;
+            else b.vy *= -1;
+            b.bounces++;
+            sound.playPop();
+            hitObs = true;
+            break;
           }
         }
 
-        // Sync local position to server at ~30Hz
-        syncTimer++;
-        if (syncTimer % 2 === 0) {
-          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            wsRef.current.send(
-              JSON.stringify({
-                type: 'TANK_SYNC_POS',
-                x: me.x,
-                y: me.y,
-                bodyAngle: me.bodyAngle,
-                turretAngle: me.turretAngle,
-                speed: curSpeed,
-                lives: me.lives,
-                hasShield: me.hasShield,
-                powerup: me.powerup,
-              })
-            );
+        if (b.bounces > 5 || hitObs && b.bounces > 5) {
+          game.bullets.splice(i, 1);
+          continue;
+        }
+
+        // Hit P1
+        if (b.owner === 'P2' && Math.hypot(b.x - p1.x, b.y - p1.y) < TANK_RADIUS + 2) {
+          p1.lives--;
+          setP1Lives(p1.lives);
+          game.bullets.splice(i, 1);
+          sound.playCrash();
+          if (p1.lives <= 0) {
+            setRoundWinner('P2');
+            setScores((prev) => {
+              const ns = { ...prev, p2: prev.p2 + 1 };
+              onScoreUpdate('cyber-tanks', ns.p2 * 100);
+              return ns;
+            });
+            sound.playVictory();
           }
+          continue;
+        }
+
+        // Hit P2
+        if (b.owner === 'P1' && Math.hypot(b.x - p2.x, b.y - p2.y) < TANK_RADIUS + 2) {
+          p2.lives--;
+          setP2Lives(p2.lives);
+          game.bullets.splice(i, 1);
+          sound.playCrash();
+          if (p2.lives <= 0) {
+            setRoundWinner('P1');
+            setScores((prev) => {
+              const ns = { ...prev, p1: prev.p1 + 1 };
+              onScoreUpdate('cyber-tanks', ns.p1 * 100);
+              return ns;
+            });
+            sound.playVictory();
+          }
+          continue;
         }
       }
 
-      // Update particle lifetimes
-      for (let i = st.particles.length - 1; i >= 0; i--) {
-        const pt = st.particles[i];
-        pt.x += pt.vx;
-        pt.y += pt.vy;
-        pt.life--;
-        pt.alpha = pt.life / 25;
-        if (pt.life <= 0) st.particles.splice(i, 1);
-      }
-
-      // =====================================================================
-      // RENDERING CANVAS
-      // =====================================================================
-      ctx.fillStyle = '#090D16';
+      // --- Render Graphics ---
+      ctx.fillStyle = '#0B0F17';
       ctx.fillRect(0, 0, ARENA_W, ARENA_H);
 
-      // Cyber Grid Background
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
+      // Grid Lines
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.05)';
       ctx.lineWidth = 1;
-      const gridSize = 40;
-      for (let x = 0; x < ARENA_W; x += gridSize) {
+      for (let x = 0; x < ARENA_W; x += 40) {
         ctx.beginPath();
         ctx.moveTo(x, 0);
         ctx.lineTo(x, ARENA_H);
         ctx.stroke();
       }
-      for (let y = 0; y < ARENA_H; y += gridSize) {
+      for (let y = 0; y < ARENA_H; y += 40) {
         ctx.beginPath();
         ctx.moveTo(0, y);
         ctx.lineTo(ARENA_W, y);
         ctx.stroke();
       }
 
-      // Draw Arena Obstacles & Walls
-      for (const obs of st.obstacles) {
-        if (obs.type === 'WALL' || obs.type === 'PILLAR') {
-          ctx.fillStyle = '#111827';
-          ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
-          ctx.strokeStyle = '#38BDF8';
-          ctx.lineWidth = 1.5;
-          ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+      // Arena Outer Border
+      ctx.strokeStyle = '#38BDF8';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(8, 8, ARENA_W - 16, ARENA_H - 16);
 
-          // Inner high-tech accent
-          ctx.fillStyle = 'rgba(56, 189, 248, 0.15)';
-          ctx.fillRect(obs.x + 3, obs.y + 3, Math.max(0, obs.w - 6), Math.max(0, obs.h - 6));
-        } else if (obs.type === 'BOX') {
-          ctx.fillStyle = '#1E1B4B';
-          ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
-          ctx.strokeStyle = '#818CF8';
-          ctx.lineWidth = 1.5;
-          ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
-          ctx.fillStyle = '#818CF8';
-          ctx.font = '10px monospace';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText('CRATE', obs.x + obs.w / 2, obs.y + obs.h / 2);
-        }
-      }
-
-      // Draw Powerups
-      for (const pup of st.powerups) {
-        ctx.save();
-        ctx.translate(pup.x, pup.y);
-        ctx.fillStyle = pup.type === 'SHIELD' ? '#3B82F6' : pup.type === 'SPEED' ? '#EAB308' : '#EC4899';
-        ctx.beginPath();
-        ctx.arc(0, 0, 13, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#FFFFFF';
+      // Draw Obstacles
+      for (const obs of OBSTACLES) {
+        ctx.fillStyle = '#1E293B';
+        ctx.strokeStyle = '#38BDF8';
         ctx.lineWidth = 2;
-        ctx.stroke();
+        ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+        ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
 
-        ctx.fillStyle = '#FFFFFF';
-        ctx.font = 'bold 11px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(pup.type === 'SHIELD' ? '🛡️' : pup.type === 'SPEED' ? '⚡' : '💥', 0, 1);
-        ctx.restore();
+        // Cyber corner accents
+        ctx.fillStyle = '#38BDF8';
+        ctx.fillRect(obs.x, obs.y, 4, 4);
+        ctx.fillRect(obs.x + obs.w - 4, obs.y, 4, 4);
+        ctx.fillRect(obs.x, obs.y + obs.h - 4, 4, 4);
+        ctx.fillRect(obs.x + obs.w - 4, obs.y + obs.h - 4, 4, 4);
       }
 
-      // Draw Particles
-      for (const pt of st.particles) {
-        ctx.save();
-        ctx.globalAlpha = Math.max(0, pt.alpha);
-        ctx.fillStyle = pt.color;
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, pt.size, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-      }
-
-      // Draw Bullets
-      for (const b of st.bullets) {
+      // Draw Bullets with Glow
+      for (const b of game.bullets) {
         ctx.save();
         ctx.fillStyle = b.color;
         ctx.shadowColor = b.color;
-        ctx.shadowBlur = 8;
+        ctx.shadowBlur = 12;
         ctx.beginPath();
-        ctx.arc(b.x, b.y, 4, 0, Math.PI * 2);
+        ctx.arc(b.x, b.y, 5, 0, Math.PI * 2);
         ctx.fill();
-
-        // Laser tail
-        ctx.strokeStyle = b.color;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(b.x, b.y);
-        ctx.lineTo(b.x - b.vx * 1.5, b.y - b.vy * 1.5);
-        ctx.stroke();
         ctx.restore();
       }
 
-      // Helper to Draw a Neon Tank
-      const drawTank = (
-        t: typeof st.p1,
-        slot: 'P1' | 'P2',
-        color: string,
-        glowColor: string,
-        label: string
-      ) => {
-        if (t.lives <= 0) return; // Destroyed
-
+      // Draw Tank Function
+      const drawTank = (tank: TankState, color: string) => {
         ctx.save();
-        ctx.translate(t.x, t.y);
+        ctx.translate(tank.x, tank.y);
+        ctx.rotate(tank.angle);
 
-        // Energy Shield Ring
-        if (t.hasShield) {
-          ctx.strokeStyle = '#60A5FA';
-          ctx.lineWidth = 2.5;
-          ctx.shadowColor = '#60A5FA';
-          ctx.shadowBlur = 12;
-          ctx.beginPath();
-          ctx.arc(0, 0, TANK_RADIUS + 7, 0, Math.PI * 2);
-          ctx.stroke();
-          ctx.shadowBlur = 0;
-        }
-
-        // Treads & Body (Rotates with bodyAngle)
-        ctx.save();
-        ctx.rotate(t.bodyAngle);
-
-        // Tread Left & Right
+        // Tracks
         ctx.fillStyle = '#1E293B';
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.2;
-        ctx.fillRect(-TANK_RADIUS - 2, -TANK_RADIUS + 2, (TANK_RADIUS + 2) * 2, 6);
-        ctx.strokeRect(-TANK_RADIUS - 2, -TANK_RADIUS + 2, (TANK_RADIUS + 2) * 2, 6);
-        ctx.fillRect(-TANK_RADIUS - 2, TANK_RADIUS - 8, (TANK_RADIUS + 2) * 2, 6);
-        ctx.strokeRect(-TANK_RADIUS - 2, TANK_RADIUS - 8, (TANK_RADIUS + 2) * 2, 6);
-
-        // Tank Chassis
-        ctx.fillStyle = '#0F172A';
-        ctx.fillRect(-TANK_RADIUS + 4, -TANK_RADIUS + 7, (TANK_RADIUS - 4) * 2, (TANK_RADIUS - 7) * 2);
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(-TANK_RADIUS + 4, -TANK_RADIUS + 7, (TANK_RADIUS - 4) * 2, (TANK_RADIUS - 7) * 2);
-        ctx.restore();
-
-        // Turret (Rotates with turretAngle)
-        ctx.save();
-        ctx.rotate(t.turretAngle);
-
-        // Cannon barrel (with recoil kick)
-        const barrelLen = 22 - t.recoil;
-        ctx.fillStyle = color;
-        ctx.fillRect(0, -3.5, barrelLen, 7);
-        ctx.strokeStyle = '#FFFFFF';
+        ctx.strokeStyle = '#64748B';
         ctx.lineWidth = 1;
-        ctx.strokeRect(0, -3.5, barrelLen, 7);
+        ctx.fillRect(-20, -18, 40, 6);
+        ctx.strokeRect(-20, -18, 40, 6);
+        ctx.fillRect(-20, 12, 40, 6);
+        ctx.strokeRect(-20, 12, 40, 6);
 
-        // Turret Dome
+        // Hull Body
         ctx.fillStyle = color;
-        ctx.shadowColor = glowColor;
-        ctx.shadowBlur = 8;
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 2;
+        ctx.fillRect(-18, -12, 36, 24);
+        ctx.strokeRect(-18, -12, 36, 24);
+
+        // Cannon Turret Barrel
+        ctx.fillStyle = '#334155';
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.fillRect(0 - tank.recoil, -5, 28, 10);
+        ctx.strokeRect(0 - tank.recoil, -5, 28, 10);
+
+        // Hatch Center Dome
         ctx.beginPath();
-        ctx.arc(0, 0, 9, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.shadowBlur = 0;
-        ctx.restore();
-
-        // Overhead Player Name & Hearts
+        ctx.arc(0, 0, 7, 0, Math.PI * 2);
         ctx.fillStyle = '#FFFFFF';
-        ctx.font = 'bold 10px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(label, 0, -TANK_RADIUS - 12);
-
-        // Hearts / Lives
-        const hearts = '❤️'.repeat(Math.max(0, t.lives));
-        ctx.font = '10px sans-serif';
-        ctx.fillText(hearts, 0, -TANK_RADIUS - 2);
+        ctx.fill();
 
         ctx.restore();
       };
 
-      // Draw P1 (Cyan) and P2 (Orange) Tanks
-      drawTank(st.p1, 'P1', '#38BDF8', 'rgba(56, 189, 248, 0.8)', mySlot === 'P1' ? 'SEN (Mavi)' : 'Rakip (Mavi)');
-      drawTank(st.p2, 'P2', '#F97316', 'rgba(249, 115, 22, 0.8)', mySlot === 'P2' ? 'SEN (Turuncu)' : 'Rakip (Turuncu)');
-
-      // Draw Status Overlays (LOBBY, COUNTDOWN, ROUND_OVER, MATCH_OVER)
-      if (st.status === 'LOBBY') {
-        ctx.fillStyle = 'rgba(9, 13, 22, 0.75)';
-        ctx.fillRect(0, 0, ARENA_W, ARENA_H);
-        ctx.fillStyle = '#FFFFFF';
-        ctx.font = 'bold 24px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('OYUNCULAR BEKLENİYOR', ARENA_W / 2, ARENA_H / 2 - 20);
-        ctx.font = '14px sans-serif';
-        ctx.fillStyle = '#94A3B8';
-        ctx.fillText('Başlamak için iki oyuncunun da "HAZIR" butonuna basması gerekir.', ARENA_W / 2, ARENA_H / 2 + 15);
-      } else if (st.status === 'COUNTDOWN') {
-        ctx.fillStyle = 'rgba(9, 13, 22, 0.6)';
-        ctx.fillRect(0, 0, ARENA_W, ARENA_H);
-        ctx.fillStyle = '#FACC15';
-        ctx.font = 'bold 72px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(String(st.countdownVal || 3), ARENA_W / 2, ARENA_H / 2 + 25);
-      } else if (st.status === 'ROUND_OVER') {
-        ctx.fillStyle = 'rgba(9, 13, 22, 0.8)';
-        ctx.fillRect(0, 0, ARENA_W, ARENA_H);
-        ctx.fillStyle = '#38BDF8';
-        ctx.font = 'bold 28px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(`RAUNT BİTTİ!`, ARENA_W / 2, ARENA_H / 2 - 20);
-        ctx.fillStyle = '#94A3B8';
-        ctx.font = '14px sans-serif';
-        ctx.fillText(`Skor: Mavi ${st.p1.score} - ${st.p2.score} Turuncu`, ARENA_W / 2, ARENA_H / 2 + 15);
-      } else if (st.status === 'MATCH_OVER') {
-        ctx.fillStyle = 'rgba(9, 13, 22, 0.85)';
-        ctx.fillRect(0, 0, ARENA_W, ARENA_H);
-        ctx.fillStyle = '#F43F5E';
-        ctx.font = 'bold 32px sans-serif';
-        ctx.textAlign = 'center';
-        const winSlot = roomData?.winner;
-        ctx.fillText(`${winSlot === 'P1' ? 'MAVİ' : 'TURUNCU'} TANK ŞAMPİYON OLDU!`, ARENA_W / 2, ARENA_H / 2 - 20);
-        ctx.fillStyle = '#38BDF8';
-        ctx.font = '14px sans-serif';
-        ctx.fillText('Yeniden oynamak için "Rövanş" butonuna tıklayın.', ARENA_W / 2, ARENA_H / 2 + 20);
-      }
+      drawTank(p1, '#3B82F6');
+      drawTank(p2, '#F43F5E');
 
       animId = requestAnimationFrame(updateGame);
     };
 
     animId = requestAnimationFrame(updateGame);
     return () => cancelAnimationFrame(animId);
-  }, [firePlayerBullet, isBotEnabled, mySlot, resetRoundArena, roomData?.winner]);
-
-  // Handle Rematch
-  const handleRematch = () => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'TANK_REMATCH' }));
-      sound.playJump();
-    }
-  };
-
-  // Next round
-  const handleNextRound = () => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'TANK_NEXT_ROUND' }));
-      sound.playJump();
-    }
-  };
-
-  // Quick Match generator
-  const handleQuickMatch = () => {
-    setMatchMode('QUICK');
-    connectWs('QUICK', 'QUICK');
-    sound.playScore();
-  };
-
-  const handleCreateCustomRoom = () => {
-    const code = 'TANK-' + Math.floor(1000 + Math.random() * 9000);
-    setRoomCodeInput(code);
-    setCurrentRoomCode(code);
-    setMatchMode('CUSTOM');
-    connectWs('CUSTOM', code);
-    sound.playScore();
-  };
-
-  const handleJoinCustomRoom = () => {
-    if (!roomCodeInput.trim()) return;
-    const clean = roomCodeInput.trim().toUpperCase();
-    setCurrentRoomCode(clean);
-    setMatchMode('CUSTOM');
-    connectWs('CUSTOM', clean);
-    sound.playScore();
-  };
-
-  const copyCode = () => {
-    const code = roomData?.code || currentRoomCode;
-    navigator.clipboard.writeText(code);
-    setCopiedCode(true);
-    sound.playScore();
-    setTimeout(() => setCopiedCode(false), 1500);
-  };
-
-  const copyInviteLink = () => {
-    const code = roomData?.code || currentRoomCode;
-    const url = `${window.location.origin}${window.location.pathname}?game=cyber-tanks&room=${code}`;
-    navigator.clipboard.writeText(url);
-    setCopiedLink(true);
-    sound.playScore();
-    setTimeout(() => setCopiedLink(false), 1500);
-  };
-
-  const myPlayerInfo = roomData?.players.find((p) => p.id === myPlayerId);
-  const isMyReady = !!myPlayerInfo?.ready;
+  }, [playMode, roundWinner, scores, onScoreUpdate]);
 
   return (
-    <div className="flex flex-col gap-4 select-none">
-      {/* Top Matchmaking & Room Management Bar */}
-      <div className="bg-[#131B2E] border border-white/10 rounded-2xl p-4 flex flex-col gap-3 shadow-lg">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Crosshair className="w-5 h-5 text-sky-400" />
-            <div>
-              <h3 className="font-extrabold text-white text-sm">SİBER TANKLAR: 1V1 CANLI DÜELLO</h3>
-              <p className="text-xs text-slate-400">
-                Lazerli tank savaşı! Hızlı eşleşin veya arkadaşınıza özel oda açın.
-              </p>
-            </div>
-          </div>
+    <div className="flex flex-col gap-4 select-none max-w-4xl mx-auto w-full">
+      {/* Mode Selector Tabs */}
+      <div className="flex bg-[#131B2E] border border-white/10 rounded-2xl p-1.5 gap-2">
+        <button
+          onClick={() => handleModeChange('SOLO')}
+          className={`flex-1 py-2 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-all ${
+            playMode === 'SOLO'
+              ? 'bg-rose-600 text-white shadow-lg shadow-rose-600/30'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+          }`}
+        >
+          <Bot className="w-4 h-4 text-amber-400" />
+          <span>Tek Kişilik (Yapay Zeka Bot)</span>
+        </button>
 
-          <div className="flex items-center gap-2">
-            {isConnected ? (
-              <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                <Wifi className="w-3.5 h-3.5 animate-pulse" /> Canlı Sunucu Aktif
-              </span>
-            ) : (
-              <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-rose-500/20 text-rose-400 border border-rose-500/30">
-                <WifiOff className="w-3.5 h-3.5" /> Bağlantı Kesildi
-              </span>
-            )}
-          </div>
-        </div>
+        <button
+          onClick={() => handleModeChange('LOCAL_2P')}
+          className={`flex-1 py-2 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-all ${
+            playMode === 'LOCAL_2P'
+              ? 'bg-rose-600 text-white shadow-lg shadow-rose-600/30'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+          }`}
+        >
+          <Users className="w-4 h-4 text-emerald-400" />
+          <span>Yerel 2 Kişilik (Aynı Klavye)</span>
+        </button>
 
-        {/* Action Controls Row */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-2 border-t border-white/10">
-          <button
-            onClick={handleQuickMatch}
-            className={`py-2 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all shadow-md ${
-              matchMode === 'QUICK'
-                ? 'bg-sky-600 text-white shadow-sky-600/30 ring-1 ring-sky-400'
-                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-white/10'
-            }`}
-          >
-            <Zap className="w-4 h-4 text-amber-400" />
-            <span>Hızlı Eşleşme (Rastgele)</span>
-          </button>
+        <button
+          onClick={() => handleModeChange('ONLINE')}
+          className={`flex-1 py-2 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-all ${
+            playMode === 'ONLINE'
+              ? 'bg-rose-600 text-white shadow-lg shadow-rose-600/30'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+          }`}
+        >
+          <Wifi className="w-4 h-4 text-sky-400" />
+          <span>Canlı Online Oda</span>
+        </button>
+      </div>
 
-          <button
-            onClick={handleCreateCustomRoom}
-            className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-white/10 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-sm"
-          >
-            <PlusCircle className="w-4 h-4 text-emerald-400" />
-            <span>Özel Oda Oluştur</span>
-          </button>
-
-          <div className="flex items-center gap-1.5">
-            <input
-              type="text"
-              value={roomCodeInput}
-              onChange={(e) => setRoomCodeInput(e.target.value.toUpperCase())}
-              placeholder="Oda Kodu"
-              maxLength={10}
-              className="flex-1 px-2.5 py-1.5 bg-slate-900 border border-white/15 rounded-xl text-xs font-mono font-bold text-white uppercase focus:outline-none focus:border-sky-500"
-            />
-            <button
-              onClick={handleJoinCustomRoom}
-              className="px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs cursor-pointer transition-colors shadow-sm"
-            >
-              Katıl
-            </button>
-          </div>
-        </div>
-
-        {/* Active Room Code & Invite Link Bar */}
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-white/10 text-xs">
-          <div className="flex items-center gap-2">
-            <span className="text-slate-400 font-medium">Aktif Oda:</span>
-            <span className="px-2.5 py-0.5 rounded-md bg-slate-900 border border-white/10 font-mono font-bold text-sky-400">
-              {roomData?.code || currentRoomCode}
+      {playMode === 'ONLINE' && (
+        <div className="bg-[#131B2E] border border-white/10 rounded-2xl p-4 flex flex-col gap-3 shadow-lg text-xs">
+          <div className="flex items-center justify-between">
+            <span className="font-bold text-white flex items-center gap-2">
+              <Crosshair className="w-4 h-4 text-rose-400" /> SİBER TANKLAR ONLINE ARENA
             </span>
-            <button
-              onClick={copyCode}
-              className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
-              title="Kodu Kopyala"
-            >
-              {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-            </button>
-            <button
-              onClick={copyInviteLink}
-              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer flex items-center gap-1 text-[11px]"
-              title="Davet Linki Kopyala"
-            >
-              {copiedLink ? <Check className="w-3 h-3 text-emerald-400" /> : <Link className="w-3 h-3" />}
-              <span>{copiedLink ? 'Link Alındı!' : 'Davet Linki'}</span>
-            </button>
+            <span className="px-2.5 py-0.5 rounded bg-slate-900 font-mono text-blue-400 font-bold">Oda: {currentRoomCode}</span>
           </div>
+        </div>
+      )}
 
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setIsBotEnabled(!isBotEnabled)}
-              className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 cursor-pointer border transition-colors ${
-                isBotEnabled
-                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-white/10'
-              }`}
-            >
-              <Bot className="w-3.5 h-3.5" />
-              <span>{isBotEnabled ? 'Yapay Zeka Devrede' : 'Yapay Zeka Rakip'}</span>
-            </button>
-
-            <button
-              onClick={toggleReady}
-              className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer shadow-md ${
-                isMyReady
-                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                  : 'bg-sky-600 hover:bg-sky-500 text-white'
-              }`}
-            >
-              {isMyReady ? '✓ HAZIRSIN' : 'HAZIR OL!'}
-            </button>
+      {/* Score / Lives Header */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-[#131B2E] border border-white/10 rounded-xl p-3.5 items-center text-xs">
+        <div className="p-2.5 rounded-lg border bg-blue-950/40 border-blue-500/50 flex items-center justify-between">
+          <div>
+            <p className="font-bold text-white">1. Oyuncu (Mavi Tank)</p>
+            <p className="text-[11px] text-slate-300 mt-0.5">
+              Can: {'❤️'.repeat(Math.max(0, p1Lives))} | Skor: <span className="text-blue-400 font-bold">{scores.p1}</span>
+            </p>
+            <p className="text-[10px] text-slate-400 mt-1 font-mono">Sür sür: W/S | Dön: A/D | Ateş: Boşluk</p>
           </div>
         </div>
 
-        {isSearchingQuick && (
-          <div className="p-3 rounded-xl bg-sky-950/60 border border-sky-500/40 flex items-center justify-between text-xs animate-pulse">
-            <div className="flex items-center gap-2 text-sky-300 font-semibold">
-              <Radio className="w-4 h-4 animate-spin" />
-              <span>Çevrim içi tankçı aranıyor... Başka bir oyuncu katıldığında düello otomatik başlayacak!</span>
-            </div>
-            <button
-              onClick={() => setIsBotEnabled(true)}
-              className="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] cursor-pointer"
-            >
-              Bot ile Kapış
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Players Header & Scoreboard */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-[#131B2E] border border-white/10 rounded-xl p-3.5 items-center">
-        {/* Blue Tank (P1) */}
-        <div
-          className={`p-2.5 rounded-lg border flex items-center justify-between ${
-            mySlot === 'P1' ? 'bg-sky-950/40 border-sky-500/50 ring-1 ring-sky-500/30' : 'bg-slate-900/50 border-white/5'
-          }`}
-        >
-          <div className="flex items-center gap-2">
-            <span className="w-3.5 h-3.5 rounded-full bg-sky-400 shadow-[0_0_8px_#38BDF8]" />
+        <div className="text-center">
+          {roundWinner ? (
             <div>
-              <p className="text-xs font-bold text-white">Mavi Tank {mySlot === 'P1' && '(SEN)'}</p>
-              <p className="text-[11px] text-slate-400">
-                Raunt Galibiyeti: <span className="font-mono font-bold text-sky-400">{roomData?.players.find((p) => p.slot === 'P1')?.score || 0}</span>
+              <p className="font-extrabold text-emerald-400 text-sm animate-pulse">
+                {roundWinner === 'P1' ? '🎉 MAVİ TANK KAZANDI!' : '🔥 KIRMIZI TANK KAZANDI!'}
               </p>
+              <button
+                onClick={resetLocalGame}
+                className="mt-2 px-4 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold rounded-lg shadow cursor-pointer text-xs"
+              >
+                Yeni Tur Başlat
+              </button>
             </div>
-          </div>
-          <Crosshair className="w-4 h-4 text-sky-400" />
-        </div>
-
-        {/* Center Match Status & Ready Controls */}
-        <div className="flex flex-col items-center justify-center gap-2">
-          <div className="flex items-center gap-3">
-            <button
-              onClick={toggleReady}
-              className={`px-4 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all shadow-md ${
-                isMyReady
-                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-500/20'
-                  : 'bg-amber-600 hover:bg-amber-500 text-white shadow-amber-500/20'
-              }`}
-            >
-              {isMyReady ? '✓ HAZIR (İptal Et)' : '⚡ HAZIR OL!'}
-            </button>
-
-            {roomData?.status === 'ROUND_OVER' && (
-              <button
-                onClick={handleNextRound}
-                className="px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold cursor-pointer shadow-md"
-              >
-                Sonraki Raunt
-              </button>
-            )}
-
-            {roomData?.status === 'MATCH_OVER' && (
-              <button
-                onClick={handleRematch}
-                className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold cursor-pointer shadow-md"
-              >
-                Rövanş Maçı
-              </button>
-            )}
-          </div>
-
-          <div className="text-[11px] text-slate-400">
-            3 Raunt Kazanan Şampiyon Olur · Her Rauntta 3 Can
-          </div>
-        </div>
-
-        {/* Orange Tank (P2) */}
-        <div
-          className={`p-2.5 rounded-lg border flex items-center justify-between ${
-            mySlot === 'P2' ? 'bg-orange-950/40 border-orange-500/50 ring-1 ring-orange-500/30' : 'bg-slate-900/50 border-white/5'
-          }`}
-        >
-          <div className="flex items-center gap-2">
-            <span className="w-3.5 h-3.5 rounded-full bg-orange-400 shadow-[0_0_8px_#F97316]" />
+          ) : (
             <div>
-              <p className="text-xs font-bold text-white">Turuncu Tank {mySlot === 'P2' && '(SEN)'}</p>
-              <p className="text-[11px] text-slate-400">
-                Raunt Galibiyeti: <span className="font-mono font-bold text-orange-400">{roomData?.players.find((p) => p.slot === 'P2')?.score || 0}</span>
-              </p>
+              <p className="font-extrabold text-white text-sm tracking-wide">LASER ARENA</p>
+              <p className="text-[11px] text-slate-400">Duvarlardan seken lazer tüfekleri!</p>
             </div>
+          )}
+        </div>
+
+        <div className="p-2.5 rounded-lg border bg-rose-950/40 border-rose-500/50 flex items-center justify-between">
+          <div>
+            <p className="font-bold text-white">{playMode === 'SOLO' ? '🤖 Cyber AI Bot' : '2. Oyuncu (Kırmızı)'}</p>
+            <p className="text-[11px] text-slate-300 mt-0.5">
+              Can: {'❤️'.repeat(Math.max(0, p2Lives))} | Skor: <span className="text-rose-400 font-bold">{scores.p2}</span>
+            </p>
+            {playMode === 'LOCAL_2P' && <p className="text-[10px] text-slate-400 mt-1 font-mono">Sür: Oklar | Ateş: Enter</p>}
           </div>
-          <Swords className="w-4 h-4 text-orange-400" />
         </div>
       </div>
 
-      {/* Main Canvas Tank Battlefield */}
-      <div className="relative bg-[#090D16] border border-white/10 rounded-xl p-2 sm:p-4 flex flex-col items-center justify-center shadow-2xl overflow-hidden">
-        {/* Floating Reaction Emoji */}
-        {floatingEmoji && (
-          <div className="absolute top-8 left-1/2 -translate-x-1/2 text-4xl animate-bounce z-20 pointer-events-none drop-shadow-lg">
-            {floatingEmoji.emoji}
-          </div>
-        )}
-
+      {/* Canvas Arena */}
+      <div className="bg-[#090D16] border border-white/10 rounded-xl p-4 flex flex-col items-center justify-center shadow-2xl relative">
         <canvas
           ref={canvasRef}
           width={ARENA_W}
           height={ARENA_H}
-          className="w-full max-w-[800px] aspect-[800/520] rounded-lg border border-white/10 shadow-inner bg-slate-950 cursor-crosshair"
+          className="max-w-full w-full h-auto rounded-xl border border-white/15 shadow-2xl bg-[#0B0F17]"
         />
 
-        {/* Live Reaction Emojis Floating Bar */}
-        <div className="mt-3 flex items-center gap-2 bg-[#111827]/90 border border-white/10 px-3 py-1.5 rounded-full shadow-lg">
-          <span className="text-[11px] text-slate-400 font-medium mr-1">Reaksiyon:</span>
-          {['🔥', '💥', '🛡️', '😎', '🎯', '⚡', '👏'].map((em) => (
-            <button
-              key={em}
-              onClick={() => sendEmoji(em)}
-              className="text-base hover:scale-125 transition-transform cursor-pointer px-1"
-            >
-              {em}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Control Guide & Game Rules */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs text-slate-300 bg-[#131B2E] border border-white/10 rounded-xl p-3.5">
-        <div className="flex items-start gap-2.5">
-          <Crosshair className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
-          <div>
-            <p className="font-semibold text-white">Hareket & Nişan Kontrolü</p>
-            <p className="text-slate-400">
-              <span className="font-mono text-white">W / A / S / D</span> veya Ok tuşları ile tankı sürün. Fare ile namluyu çevirin ve Sol Tık / Boşluk ile ateş edin.
-            </p>
-          </div>
-        </div>
-
-        <div className="flex items-start gap-2.5">
-          <Zap className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-          <div>
-            <p className="font-semibold text-white">Seken Lazer Fizikleri</p>
-            <p className="text-slate-400">
-              Lazerler duvarlardan 2 kez seker! Köşe arkasındaki rakipleri seken atışlarla şaşırtarak vurun.
-            </p>
-          </div>
-        </div>
-
-        <div className="flex items-start gap-2.5">
-          <Shield className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-          <div>
-            <p className="font-semibold text-white">Arenadaki Güçlendiriciler</p>
-            <p className="text-slate-400">
-              <span className="text-blue-300 font-medium">🛡️ Kalkan</span> 1 vuruşu emer, <span className="text-amber-300 font-medium">⚡ Hız</span> tankı hızlandırır, <span className="text-pink-300 font-medium">💥 Üçlü</span> lazer saçar.
-            </p>
-          </div>
+        <div className="flex items-center gap-3 mt-4 pt-3 border-t border-white/10 w-full justify-between text-xs">
+          <span className="text-slate-400 font-medium">
+            Mod: {playMode === 'SOLO' ? 'Tek Kişilik (Yapay Zeka)' : playMode === 'LOCAL_2P' ? 'Yerel 2 Kişilik' : 'Online Oda'}
+          </span>
+          <button
+            onClick={resetLocalGame}
+            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-lg border border-white/10 flex items-center gap-1.5 cursor-pointer transition-colors"
+          >
+            <RotateCcw className="w-3.5 h-3.5" /> Oyunu Sıfırla
+          </button>
         </div>
       </div>
     </div>

@@ -298,7 +298,7 @@ interface HexaPlayer {
 interface Room {
   code: string;
   players: HexaPlayer[];
-  board: Array<'BLUE' | 'RED' | null>; // 64 cells
+  board: Array<'BLUE' | 'RED' | 'OBSTACLE' | null>; // 144 cells
   turn: 'BLUE' | 'RED';
   winner: 'BLUE' | 'RED' | 'DRAW' | null;
   blueScore: number;
@@ -307,12 +307,24 @@ interface Room {
 
 const rooms = new Map<string, Room>();
 
-function initBoard(): Array<'BLUE' | 'RED' | null> {
-  const board: Array<'BLUE' | 'RED' | null> = new Array(64).fill(null);
+function initBoard(): Array<'BLUE' | 'RED' | 'OBSTACLE' | null> {
+  const board: Array<'BLUE' | 'RED' | 'OBSTACLE' | null> = new Array(144).fill(null);
+  // Blue starting pieces (3 pieces)
   board[0] = 'BLUE';
-  board[7] = 'RED';
-  board[56] = 'RED';
-  board[63] = 'BLUE';
+  board[1] = 'BLUE';
+  board[12] = 'BLUE';
+
+  // Red starting pieces (3 pieces)
+  board[143] = 'RED';
+  board[142] = 'RED';
+  board[131] = 'RED';
+
+  // Obstacles (8 strategic obstacles)
+  const obstacleIndices = [33, 38, 54, 57, 86, 89, 105, 110];
+  obstacleIndices.forEach((idx) => {
+    board[idx] = 'OBSTACLE';
+  });
+
   return board;
 }
 
@@ -682,8 +694,8 @@ wss.on('connection', (ws: WebSocket) => {
             board: initBoard(),
             turn: 'BLUE',
             winner: null,
-            blueScore: 2,
-            redScore: 2,
+            blueScore: 3,
+            redScore: 3,
           };
           rooms.set(matchCode, room);
 
@@ -715,8 +727,8 @@ wss.on('connection', (ws: WebSocket) => {
               board: initBoard(),
               turn: 'BLUE',
               winner: null,
-              blueScore: 2,
-              redScore: 2,
+              blueScore: 3,
+              redScore: 3,
             };
             rooms.set(matchCode, room);
 
@@ -741,8 +753,8 @@ wss.on('connection', (ws: WebSocket) => {
             board: initBoard(),
             turn: 'BLUE',
             winner: null,
-            blueScore: 2,
-            redScore: 2,
+            blueScore: 3,
+            redScore: 3,
           };
           rooms.set(roomCode, room);
         }
@@ -775,14 +787,14 @@ wss.on('connection', (ws: WebSocket) => {
         const player = room.players.find((p: HexaPlayer) => p.id === playerId);
         if (!player || player.side !== room.turn || room.winner) return;
 
-        if (toIdx < 0 || toIdx >= 64 || fromIdx < 0 || fromIdx >= 64) return;
+        if (toIdx < 0 || toIdx >= 144 || fromIdx < 0 || fromIdx >= 144) return;
         if (room.board[fromIdx] !== player.side) return;
         if (room.board[toIdx] !== null) return;
 
-        const fromR = Math.floor(fromIdx / 8);
-        const fromC = fromIdx % 8;
-        const toR = Math.floor(toIdx / 8);
-        const toC = toIdx % 8;
+        const fromR = Math.floor(fromIdx / 12);
+        const fromC = fromIdx % 12;
+        const toR = Math.floor(toIdx / 12);
+        const toC = toIdx % 12;
         const dist = Math.max(Math.abs(fromR - toR), Math.abs(fromC - toC));
 
         if (dist === 1) {
@@ -799,8 +811,8 @@ wss.on('connection', (ws: WebSocket) => {
           for (let dc = -1; dc <= 1; dc++) {
             const nr = toR + dr;
             const nc = toC + dc;
-            if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) {
-              const neighborIdx = nr * 8 + nc;
+            if (nr >= 0 && nr < 12 && nc >= 0 && nc < 12) {
+              const neighborIdx = nr * 12 + nc;
               if (room.board[neighborIdx] === enemySide) {
                 room.board[neighborIdx] = player.side;
               }
@@ -828,8 +840,8 @@ wss.on('connection', (ws: WebSocket) => {
         room.board = initBoard();
         room.turn = 'BLUE';
         room.winner = null;
-        room.blueScore = 2;
-        room.redScore = 2;
+        room.blueScore = 3;
+        room.redScore = 3;
         broadcastRoom(room);
       } else if (data.type === 'HEXA_EMOJI' && client.currentRoom) {
         const room = client.currentRoom;

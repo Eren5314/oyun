@@ -18,6 +18,8 @@ export interface Obstacle {
     | 'SPEED_3X'
     | 'FINISH';
   triggered?: boolean;
+  triggeredP1?: boolean;
+  triggeredP2?: boolean;
 }
 
 export interface LevelConfig {

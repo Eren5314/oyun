@@ -6,54 +6,117 @@ import {
   Swords,
   Wifi,
   WifiOff,
-  Copy,
-  Check,
   Bot,
   Zap,
   Sparkles,
   Trophy,
-  PlusCircle,
-  Link,
-  Radio,
+  Bomb,
+  Flame,
+  ShieldAlert,
+  Crosshair,
+  Lock,
 } from 'lucide-react';
 import { sound } from '../utils/sound';
 
-interface HexaPlayer {
+interface Player {
   id: string;
   name: string;
   side: 'BLUE' | 'RED';
 }
 
-interface RoomData {
+interface GameState {
   code: string;
-  players: HexaPlayer[];
-  board: Array<'BLUE' | 'RED' | null>;
+  players: Player[];
+  board: Array<'BLUE' | 'RED' | 'SHIELDED' | null>;
   turn: 'BLUE' | 'RED';
   winner: 'BLUE' | 'RED' | 'DRAW' | null;
   blueScore: number;
   redScore: number;
+  blueEnergy: number;
+  redEnergy: number;
 }
 
 export const HexaConquestOnlineGame: React.FC<{
   onScoreUpdate: (id: string, s: number) => void;
   playerName?: string;
 }> = ({ onScoreUpdate, playerName }) => {
-  const [matchMode, setMatchMode] = useState<'QUICK' | 'CUSTOM'>('CUSTOM');
-  const [roomCodeInput, setRoomCodeInput] = useState('ARENA1');
-  const [currentRoomCode, setCurrentRoomCode] = useState('ARENA1');
+  const [playMode, setPlayMode] = useState<'ONLINE' | 'SOLO' | 'LOCAL_2P'>('SOLO');
+  const [roomCodeInput, setRoomCodeInput] = useState('CYBER1');
+  const [currentRoomCode, setCurrentRoomCode] = useState('CYBER1');
   const [isConnected, setIsConnected] = useState(false);
-  const [isSearchingQuick, setIsSearchingQuick] = useState(false);
-  const [roomData, setRoomData] = useState<RoomData | null>(null);
   const [selectedCell, setSelectedCell] = useState<number | null>(null);
+  const [activeAbility, setActiveAbility] = useState<'NONE' | 'LASER' | 'SHIELD'>('NONE');
   const [myPlayerId] = useState(() => 'P_' + Math.random().toString(36).substring(2, 8).toUpperCase());
-  const [copiedCode, setCopiedCode] = useState(false);
-  const [copiedLink, setCopiedLink] = useState(false);
-  const [isBotPlaying, setIsBotPlaying] = useState(false);
-  const [autoBotMode, setAutoBotMode] = useState(false);
   const [floatingEmoji, setFloatingEmoji] = useState<{ emoji: string; id: number } | null>(null);
+
+  // 8x8 Grid for Cyber Territory Strategy
+  const createInitialBoard = () => {
+    const board: Array<'BLUE' | 'RED' | 'SHIELDED' | null> = Array(64).fill(null);
+    // Starting positions
+    board[0] = 'BLUE';
+    board[7] = 'RED';
+    board[56] = 'RED';
+    board[63] = 'BLUE';
+    return board;
+  };
+
+  const [gameState, setGameState] = useState<GameState>(() => ({
+    code: 'SOLO-AI',
+    players: [
+      { id: myPlayerId, name: playerName || 'Komutan', side: 'BLUE' },
+      { id: 'BOT', name: 'Cyber AI', side: 'RED' },
+    ],
+    board: createInitialBoard(),
+    turn: 'BLUE',
+    winner: null,
+    blueScore: 2,
+    redScore: 2,
+    blueEnergy: 3,
+    redEnergy: 3,
+  }));
 
   const wsRef = useRef<WebSocket | null>(null);
   const myDisplayName = playerName || 'Komutan ' + myPlayerId.slice(2, 6);
+
+  const handleModeChange = (mode: 'ONLINE' | 'SOLO' | 'LOCAL_2P') => {
+    setPlayMode(mode);
+    sound.playScore();
+    setSelectedCell(null);
+    setActiveAbility('NONE');
+
+    const board = createInitialBoard();
+    if (mode === 'SOLO') {
+      setGameState({
+        code: 'SOLO-AI',
+        players: [
+          { id: myPlayerId, name: myDisplayName, side: 'BLUE' },
+          { id: 'BOT', name: 'Cyber AI', side: 'RED' },
+        ],
+        board,
+        turn: 'BLUE',
+        winner: null,
+        blueScore: 2,
+        redScore: 2,
+        blueEnergy: 3,
+        redEnergy: 3,
+      });
+    } else if (mode === 'LOCAL_2P') {
+      setGameState({
+        code: 'LOCAL-2P',
+        players: [
+          { id: 'P1', name: '1. Oyuncu (Mavi)', side: 'BLUE' },
+          { id: 'P2', name: '2. Oyuncu (Kırmızı)', side: 'RED' },
+        ],
+        board,
+        turn: 'BLUE',
+        winner: null,
+        blueScore: 2,
+        redScore: 2,
+        blueEnergy: 3,
+        redEnergy: 3,
+      });
+    }
+  };
 
   const connectWs = useCallback(
     (action: 'QUICK' | 'CUSTOM', code: string) => {
@@ -70,40 +133,25 @@ export const HexaConquestOnlineGame: React.FC<{
 
       ws.onopen = () => {
         setIsConnected(true);
-        if (action === 'QUICK') {
-          setIsSearchingQuick(true);
-          ws.send(
-            JSON.stringify({
-              type: 'HEXA_QUICK_MATCH',
-              playerId: myPlayerId,
-              name: myDisplayName,
-            })
-          );
-        } else {
-          setIsSearchingQuick(false);
-          ws.send(
-            JSON.stringify({
-              type: 'JOIN_ROOM',
-              code: code,
-              playerId: myPlayerId,
-              name: myDisplayName,
-            })
-          );
-        }
+        ws.send(
+          JSON.stringify({
+            type: 'JOIN_ROOM',
+            code: code,
+            playerId: myPlayerId,
+            name: myDisplayName,
+          })
+        );
       };
 
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === 'HEXA_QUEUE_WAITING') {
-            setIsSearchingQuick(true);
-          } else if (msg.type === 'ROOM_UPDATE') {
-            setIsSearchingQuick(false);
-            setRoomData(msg);
+          if (msg.type === 'ROOM_UPDATE') {
+            setGameState(msg);
             setCurrentRoomCode(msg.code);
             if (msg.winner) {
               sound.playVictory();
-              onScoreUpdate('hexa-conquest', Math.max(msg.blueScore, msg.redScore) * 10);
+              onScoreUpdate('hexa-conquest', Math.max(msg.blueScore, msg.redScore) * 15);
             }
           } else if (msg.type === 'HEXA_EMOJI_RELAY') {
             setFloatingEmoji({ emoji: msg.emoji, id: Date.now() });
@@ -113,51 +161,40 @@ export const HexaConquestOnlineGame: React.FC<{
         } catch {}
       };
 
-      ws.onclose = () => {
-        setIsConnected(false);
-      };
-
-      ws.onerror = () => {
-        setIsConnected(false);
-      };
+      ws.onclose = () => setIsConnected(false);
+      ws.onerror = () => setIsConnected(false);
     },
     [myDisplayName, myPlayerId, onScoreUpdate]
   );
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const roomParam = params.get('room');
-    if (roomParam) {
-      setRoomCodeInput(roomParam);
-      setCurrentRoomCode(roomParam);
+    if (playMode === 'ONLINE') {
+      const params = new URLSearchParams(window.location.search);
+      const roomParam = params.get('room') || currentRoomCode;
       connectWs('CUSTOM', roomParam);
-    } else {
-      connectWs('CUSTOM', currentRoomCode);
     }
-
     return () => {
       if (wsRef.current) wsRef.current.close();
     };
-  }, []);
+  }, [playMode, connectWs, currentRoomCode]);
 
-  const me = roomData?.players.find((p) => p.id === myPlayerId);
-  const mySide = me?.side || 'BLUE';
-  const isMyTurn = roomData?.turn === mySide && !roomData?.winner;
+  const me = gameState?.players.find((p) => p.id === myPlayerId) || gameState?.players[0];
+  const mySide = playMode === 'ONLINE' ? (me?.side || 'BLUE') : gameState.turn;
+  const isMyTurn = playMode === 'ONLINE' ? (gameState?.turn === (me?.side || 'BLUE') && !gameState?.winner) : !gameState?.winner;
 
-  // Send reaction emoji
   const sendEmoji = (emoji: string) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    setFloatingEmoji({ emoji, id: Date.now() });
+    setTimeout(() => setFloatingEmoji(null), 2000);
+    sound.playPop();
+    if (playMode === 'ONLINE' && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'HEXA_EMOJI', emoji }));
-      setFloatingEmoji({ emoji, id: Date.now() });
-      setTimeout(() => setFloatingEmoji(null), 2000);
-      sound.playPop();
     }
   };
 
-  // Valid move calculations (Clone: dist 1, Jump: dist 2)
+  // Valid moves: Any empty cell within distance 1 (clone) or 2 (jump) of ANY of player's existing pieces
   const getValidMoves = useCallback(
     (fromIdx: number): { clones: number[]; jumps: number[] } => {
-      if (!roomData) return { clones: [], jumps: [] };
+      if (!gameState) return { clones: [], jumps: [] };
       const clones: number[] = [];
       const jumps: number[] = [];
 
@@ -167,7 +204,7 @@ export const HexaConquestOnlineGame: React.FC<{
       for (let r = 0; r < 8; r++) {
         for (let c = 0; c < 8; c++) {
           const targetIdx = r * 8 + c;
-          if (roomData.board[targetIdx] !== null) continue;
+          if (gameState.board[targetIdx] !== null) continue;
 
           const dist = Math.max(Math.abs(fromR - r), Math.abs(fromC - c));
           if (dist === 1) {
@@ -179,15 +216,157 @@ export const HexaConquestOnlineGame: React.FC<{
       }
       return { clones, jumps };
     },
-    [roomData]
+    [gameState]
   );
 
+  // Execute Move Locally with Othello-style neighboring conversion
+  const executeMoveLocally = (fromIdx: number, toIdx: number) => {
+    const currentBoard = [...gameState.board];
+    const currentTurn = gameState.turn;
+    const enemySide = currentTurn === 'BLUE' ? 'RED' : 'BLUE';
+
+    const fromR = Math.floor(fromIdx / 8);
+    const fromC = fromIdx % 8;
+    const toR = Math.floor(toIdx / 8);
+    const toC = toIdx % 8;
+
+    const dist = Math.max(Math.abs(fromR - toR), Math.abs(fromC - toC));
+
+    if (dist === 2) {
+      currentBoard[fromIdx] = null; // Jump leaves original square
+    }
+
+    currentBoard[toIdx] = currentTurn;
+
+    // Convert all adjacent opponent cells (unless shielded)
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        const nr = toR + dr;
+        const nc = toC + dc;
+        if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) {
+          const nIdx = nr * 8 + nc;
+          if (currentBoard[nIdx] === enemySide) {
+            currentBoard[nIdx] = currentTurn;
+          }
+        }
+      }
+    }
+
+    // Recount scores & award energy
+    let blueCount = 0;
+    let redCount = 0;
+    let emptyCount = 0;
+
+    currentBoard.forEach((cell) => {
+      if (cell === 'BLUE') blueCount++;
+      else if (cell === 'RED') redCount++;
+      else emptyCount++;
+    });
+
+    let winner: 'BLUE' | 'RED' | 'DRAW' | null = null;
+    if (emptyCount === 0 || blueCount === 0 || redCount === 0) {
+      if (blueCount > redCount) winner = 'BLUE';
+      else if (redCount > blueCount) winner = 'RED';
+      else winner = 'DRAW';
+      sound.playVictory();
+      onScoreUpdate('hexa-conquest', Math.max(blueCount, redCount) * 15);
+    } else {
+      sound.playScore();
+    }
+
+    const nextTurn = enemySide;
+    const energyGain = 1;
+
+    setGameState((prev) => ({
+      ...prev,
+      board: currentBoard,
+      turn: nextTurn,
+      winner,
+      blueScore: blueCount,
+      redScore: redCount,
+      blueEnergy: currentTurn === 'BLUE' ? prev.blueEnergy + energyGain : prev.blueEnergy,
+      redEnergy: currentTurn === 'RED' ? prev.redEnergy + energyGain : prev.redEnergy,
+    }));
+  };
+
+  // Laser Strike Ability (Cost: 3 energy)
+  const useLaserLocally = (targetIdx: number) => {
+    const currentBoard = [...gameState.board];
+    const currentTurn = gameState.turn;
+    const cellVal = currentBoard[targetIdx];
+
+    if (cellVal === null || cellVal === currentTurn) return;
+
+    currentBoard[targetIdx] = null;
+    sound.playCrash();
+
+    let blueCount = 0;
+    let redCount = 0;
+    currentBoard.forEach((cell) => {
+      if (cell === 'BLUE') blueCount++;
+      else if (cell === 'RED') redCount++;
+    });
+
+    const enemySide = currentTurn === 'BLUE' ? 'RED' : 'BLUE';
+
+    setGameState((prev) => ({
+      ...prev,
+      board: currentBoard,
+      turn: enemySide,
+      blueScore: blueCount,
+      redScore: redCount,
+      blueEnergy: currentTurn === 'BLUE' ? prev.blueEnergy - 3 : prev.blueEnergy,
+      redEnergy: currentTurn === 'RED' ? prev.redEnergy - 3 : prev.redEnergy,
+    }));
+    setActiveAbility('NONE');
+  };
+
   const handleCellClick = (idx: number) => {
-    if (!roomData || !isMyTurn) return;
+    if (gameState.winner) return;
 
-    const cellVal = roomData.board[idx];
+    if (playMode === 'ONLINE') {
+      if (!isMyTurn) return;
+      const cellVal = gameState.board[idx];
+      if (cellVal === mySide) {
+        setSelectedCell(idx === selectedCell ? null : idx);
+        sound.playPop();
+        return;
+      }
+      if (selectedCell !== null && cellVal === null) {
+        const valid = getValidMoves(selectedCell);
+        if (valid.clones.includes(idx) || valid.jumps.includes(idx)) {
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(
+              JSON.stringify({
+                type: 'MAKE_MOVE',
+                fromIdx: selectedCell,
+                toIdx: idx,
+                playerId: myPlayerId,
+              })
+            );
+            sound.playScore();
+          }
+          setSelectedCell(null);
+        }
+      }
+      return;
+    }
 
-    if (cellVal === mySide) {
+    // Local / Solo Mode Handling
+    if (activeAbility === 'LASER') {
+      const cellVal = gameState.board[idx];
+      const currentTurn = gameState.turn;
+      const energy = currentTurn === 'BLUE' ? gameState.blueEnergy : gameState.redEnergy;
+      if (cellVal && cellVal !== currentTurn && energy >= 3) {
+        useLaserLocally(idx);
+      }
+      return;
+    }
+
+    const cellVal = gameState.board[idx];
+    const currentTurn = gameState.turn;
+
+    if (cellVal === currentTurn) {
       setSelectedCell(idx === selectedCell ? null : idx);
       sound.playPop();
       return;
@@ -195,352 +374,261 @@ export const HexaConquestOnlineGame: React.FC<{
 
     if (selectedCell !== null && cellVal === null) {
       const valid = getValidMoves(selectedCell);
-      const isClone = valid.clones.includes(idx);
-      const isJump = valid.jumps.includes(idx);
-
-      if (isClone || isJump) {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(
-            JSON.stringify({
-              type: 'MAKE_MOVE',
-              fromIdx: selectedCell,
-              toIdx: idx,
-              playerId: myPlayerId,
-            })
-          );
-          if (isClone) sound.playPad();
-          else sound.playScore();
-        }
+      if (valid.clones.includes(idx) || valid.jumps.includes(idx)) {
+        executeMoveLocally(selectedCell, idx);
         setSelectedCell(null);
       }
     }
   };
 
-  // Bot logic
-  const playBotMove = useCallback(() => {
-    if (!roomData || isBotPlaying || roomData.winner) return;
+  // Bot AI Turn in SOLO Mode
+  const [isBotPlaying, setIsBotPlaying] = useState(false);
+  useEffect(() => {
+    if (playMode === 'SOLO' && gameState.turn === 'RED' && !gameState.winner && !isBotPlaying) {
+      setIsBotPlaying(true);
+      const timer = setTimeout(() => {
+        const redPieces: number[] = [];
+        gameState.board.forEach((val, idx) => {
+          if (val === 'RED') redPieces.push(idx);
+        });
 
-    setIsBotPlaying(true);
-    setTimeout(() => {
-      const enemySide = mySide === 'BLUE' ? 'RED' : 'BLUE';
-      const enemyPieces: number[] = [];
-      roomData.board.forEach((val, idx) => {
-        if (val === enemySide) enemyPieces.push(idx);
-      });
+        if (redPieces.length === 0) {
+          setIsBotPlaying(false);
+          return;
+        }
 
-      if (enemyPieces.length === 0) {
-        setIsBotPlaying(false);
-        return;
-      }
+        // AI Laser ability if enough energy
+        if (gameState.redEnergy >= 3 && Math.random() < 0.4) {
+          const bluePieces: number[] = [];
+          gameState.board.forEach((val, idx) => {
+            if (val === 'BLUE') bluePieces.push(idx);
+          });
+          if (bluePieces.length > 0) {
+            const target = bluePieces[Math.floor(Math.random() * bluePieces.length)];
+            const currentBoard = [...gameState.board];
+            currentBoard[target] = null;
+            sound.playCrash();
+            let blueCount = 0;
+            let redCount = 0;
+            currentBoard.forEach((cell) => {
+              if (cell === 'BLUE') blueCount++;
+              else if (cell === 'RED') redCount++;
+            });
+            setGameState((prev) => ({
+              ...prev,
+              board: currentBoard,
+              turn: 'BLUE',
+              blueScore: blueCount,
+              redScore: redCount,
+              redEnergy: prev.redEnergy - 3,
+            }));
+            setIsBotPlaying(false);
+            return;
+          }
+        }
 
-      let bestMove: { from: number; to: number } | null = null;
-      let maxScore = -1;
+        // Find best move capturing max tiles
+        let bestMove: { from: number; to: number } | null = null;
+        let maxCaptures = -1;
 
-      for (const from of enemyPieces) {
-        const moves = getValidMoves(from);
-        for (const to of [...moves.clones, ...moves.jumps]) {
-          const toR = Math.floor(to / 8);
-          const toC = to % 8;
-          let captures = 0;
-          for (let dr = -1; dr <= 1; dr++) {
-            for (let dc = -1; dc <= 1; dc++) {
-              const nr = toR + dr;
-              const nc = toC + dc;
-              if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) {
-                if (roomData.board[nr * 8 + nc] === mySide) captures++;
+        for (const from of redPieces) {
+          const fromR = Math.floor(from / 8);
+          const fromC = from % 8;
+          for (let r = 0; r < 8; r++) {
+            for (let c = 0; c < 8; c++) {
+              const to = r * 8 + c;
+              if (gameState.board[to] !== null) continue;
+              const dist = Math.max(Math.abs(fromR - r), Math.abs(fromC - c));
+              if (dist === 1 || dist === 2) {
+                let captures = 0;
+                for (let dr = -1; dr <= 1; dr++) {
+                  for (let dc = -1; dc <= 1; dc++) {
+                    const nr = r + dr;
+                    const nc = c + dc;
+                    if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) {
+                      if (gameState.board[nr * 8 + nc] === 'BLUE') captures++;
+                    }
+                  }
+                }
+                if (captures > maxCaptures) {
+                  maxCaptures = captures;
+                  bestMove = { from, to };
+                }
               }
             }
           }
-          if (captures > maxScore) {
-            maxScore = captures;
-            bestMove = { from, to };
-          }
         }
-      }
 
-      if (bestMove && wsRef.current) {
-        const enemyPlayer = roomData.players.find((p) => p.side === enemySide);
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'MAKE_MOVE',
-            fromIdx: bestMove.from,
-            toIdx: bestMove.to,
-            playerId: enemyPlayer?.id || 'BOT',
-          })
-        );
-      }
-      setIsBotPlaying(false);
-    }, 450);
-  }, [getValidMoves, mySide, roomData, isBotPlaying]);
+        if (bestMove) {
+          executeMoveLocally(bestMove.from, bestMove.to);
+        }
+        setIsBotPlaying(false);
+      }, 600);
 
-  useEffect(() => {
-    if (autoBotMode && !isMyTurn && !roomData?.winner && !isBotPlaying) {
-      const timer = setTimeout(() => {
-        playBotMove();
-      }, 500);
       return () => clearTimeout(timer);
     }
-  }, [autoBotMode, isMyTurn, playBotMove, roomData?.winner, isBotPlaying]);
+  }, [playMode, gameState, isBotPlaying]);
 
   const handleReset = () => {
-    if (wsRef.current) {
-      wsRef.current.send(JSON.stringify({ type: 'RESET_GAME' }));
-      sound.playJump();
+    setSelectedCell(null);
+    setActiveAbility('NONE');
+    if (playMode === 'ONLINE') {
+      if (wsRef.current) wsRef.current.send(JSON.stringify({ type: 'RESET_GAME' }));
+    } else {
+      handleModeChange(playMode);
     }
-  };
-
-  const handleQuickMatch = () => {
-    setMatchMode('QUICK');
-    connectWs('QUICK', 'QUICK');
-    sound.playScore();
-  };
-
-  const handleCreateCustomRoom = () => {
-    const code = 'HEXA-' + Math.floor(1000 + Math.random() * 9000);
-    setRoomCodeInput(code);
-    setCurrentRoomCode(code);
-    setMatchMode('CUSTOM');
-    connectWs('CUSTOM', code);
-    sound.playScore();
-  };
-
-  const handleJoinCustomRoom = () => {
-    if (!roomCodeInput.trim()) return;
-    const clean = roomCodeInput.trim().toUpperCase();
-    setCurrentRoomCode(clean);
-    setMatchMode('CUSTOM');
-    connectWs('CUSTOM', clean);
-    sound.playScore();
-  };
-
-  const copyCode = () => {
-    const code = roomData?.code || currentRoomCode;
-    navigator.clipboard.writeText(code);
-    setCopiedCode(true);
-    sound.playScore();
-    setTimeout(() => setCopiedCode(false), 1500);
-  };
-
-  const copyInviteLink = () => {
-    const code = roomData?.code || currentRoomCode;
-    const url = `${window.location.origin}${window.location.pathname}?game=hexa-conquest&room=${code}`;
-    navigator.clipboard.writeText(url);
-    setCopiedLink(true);
-    sound.playScore();
-    setTimeout(() => setCopiedLink(false), 1500);
   };
 
   const activeValidMoves = selectedCell !== null ? getValidMoves(selectedCell) : { clones: [], jumps: [] };
 
   return (
-    <div className="flex flex-col gap-4 select-none">
-      {/* Top Matchmaking & Room Panel */}
-      <div className="bg-[#131B2E] border border-white/10 rounded-2xl p-4 flex flex-col gap-3 shadow-lg">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Swords className="w-5 h-5 text-sky-400" />
+    <div className="flex flex-col gap-4 select-none max-w-4xl mx-auto w-full">
+      {/* Mode Selector Tabs */}
+      <div className="flex bg-[#131B2E] border border-white/10 rounded-2xl p-1.5 gap-2">
+        <button
+          onClick={() => handleModeChange('SOLO')}
+          className={`flex-1 py-2 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-all ${
+            playMode === 'SOLO'
+              ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+          }`}
+        >
+          <Bot className="w-4 h-4 text-amber-400" />
+          <span>Tek Kişilik (Yapay Zeka)</span>
+        </button>
+
+        <button
+          onClick={() => handleModeChange('LOCAL_2P')}
+          className={`flex-1 py-2 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-all ${
+            playMode === 'LOCAL_2P'
+              ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+          }`}
+        >
+          <Users className="w-4 h-4 text-emerald-400" />
+          <span>Yerel 2 Kişilik (Aynı Cihaz)</span>
+        </button>
+
+        <button
+          onClick={() => handleModeChange('ONLINE')}
+          className={`flex-1 py-2 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-all ${
+            playMode === 'ONLINE'
+              ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+          }`}
+        >
+          <Wifi className="w-4 h-4 text-sky-400" />
+          <span>Canlı Online Oda</span>
+        </button>
+      </div>
+
+      {playMode === 'ONLINE' && (
+        <div className="bg-[#131B2E] border border-white/10 rounded-2xl p-4 flex flex-col gap-3 shadow-lg">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Swords className="w-5 h-5 text-sky-400" />
+              <div>
+                <h3 className="font-extrabold text-white text-sm">SIBER ALAN: CANLI ONLINE SAVAŞ</h3>
+                <p className="text-xs text-slate-400">Alan Hakimiyeti & Enerji Yetenekleri</p>
+              </div>
+            </div>
             <div>
-              <h3 className="font-extrabold text-white text-sm">HEXA FETİH: CANLI ONLINE STRATEJİ</h3>
-              <p className="text-xs text-slate-400">
-                Gerçek oyuncularla alan kontrolü savaşı!
+              {isConnected ? (
+                <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                  <Wifi className="w-3.5 h-3.5 animate-pulse" /> Bağlı
+                </span>
+              ) : (
+                <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-rose-500/20 text-rose-400 border border-rose-500/30">
+                  <WifiOff className="w-3.5 h-3.5" /> Bağlantı Bekleniyor
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Score, Energy & Turn Banner */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-[#131B2E] border border-white/10 rounded-xl p-3.5 items-center">
+        <div className="p-2.5 rounded-lg border bg-blue-950/40 border-blue-500/50 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="w-3.5 h-3.5 rounded-full bg-blue-500 shadow-[0_0_8px_#3B82F6]" />
+            <div>
+              <p className="text-xs font-bold text-white">Mavi Birlik</p>
+              <p className="text-[11px] text-slate-400">
+                Bölge: <span className="font-mono font-bold text-blue-400">{gameState.blueScore}</span>
               </p>
             </div>
           </div>
-
           <div className="flex items-center gap-2">
-            {isConnected ? (
-              <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                <Wifi className="w-3.5 h-3.5 animate-pulse" /> Canlı Sunucu Aktif
-              </span>
-            ) : (
-              <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-rose-500/20 text-rose-400 border border-rose-500/30">
-                <WifiOff className="w-3.5 h-3.5" /> Bağlantı Kesildi
-              </span>
+            <span className="flex items-center gap-1 text-xs font-mono font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/30">
+              <Zap className="w-3 h-3" /> {gameState.blueEnergy}
+            </span>
+            {playMode !== 'ONLINE' && gameState.turn === 'BLUE' && gameState.blueEnergy >= 3 && !gameState.winner && (
+              <button
+                onClick={() => setActiveAbility(activeAbility === 'LASER' ? 'NONE' : 'LASER')}
+                className={`px-2 py-1 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                  activeAbility === 'LASER' ? 'bg-amber-500 text-slate-950 animate-pulse' : 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
+                }`}
+              >
+                Lazer (3ş)
+              </button>
             )}
           </div>
         </div>
 
-        {/* Action Controls Row */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-2 border-t border-white/10">
-          {/* Quick match button */}
-          <button
-            onClick={handleQuickMatch}
-            className={`py-2 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all shadow-md ${
-              matchMode === 'QUICK'
-                ? 'bg-blue-600 text-white shadow-blue-600/30 ring-1 ring-blue-400'
-                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-white/10'
-            }`}
-          >
-            <Zap className="w-4 h-4 text-amber-400" />
-            <span>Hızlı Eşleşme (Rastgele)</span>
-          </button>
-
-          {/* Create private room */}
-          <button
-            onClick={handleCreateCustomRoom}
-            className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-white/10 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-sm"
-          >
-            <PlusCircle className="w-4 h-4 text-emerald-400" />
-            <span>Özel Oda Oluştur</span>
-          </button>
-
-          {/* Join private room input */}
-          <div className="flex items-center gap-1.5">
-            <input
-              type="text"
-              value={roomCodeInput}
-              onChange={(e) => setRoomCodeInput(e.target.value.toUpperCase())}
-              placeholder="Oda Kodu"
-              maxLength={10}
-              className="flex-1 px-2.5 py-1.5 bg-slate-900 border border-white/15 rounded-xl text-xs font-mono font-bold text-white uppercase focus:outline-none focus:border-blue-500"
-            />
-            <button
-              onClick={handleJoinCustomRoom}
-              className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs cursor-pointer transition-colors shadow-sm"
-            >
-              Katıl
-            </button>
-          </div>
-        </div>
-
-        {/* Active Room Code & Invite Link Bar */}
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-white/10 text-xs">
-          <div className="flex items-center gap-2">
-            <span className="text-slate-400 font-medium">Aktif Oda:</span>
-            <span className="px-2.5 py-0.5 rounded-md bg-slate-900 border border-white/10 font-mono font-bold text-blue-400">
-              {roomData?.code || currentRoomCode}
-            </span>
-            <button
-              onClick={copyCode}
-              className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
-              title="Kodu Kopyala"
-            >
-              {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-            </button>
-            <button
-              onClick={copyInviteLink}
-              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer flex items-center gap-1 text-[11px]"
-              title="Davet Linki Kopyala"
-            >
-              {copiedLink ? <Check className="w-3 h-3 text-emerald-400" /> : <Link className="w-3 h-3" />}
-              <span>{copiedLink ? 'Link Alındı!' : 'Davet Linki'}</span>
-            </button>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setAutoBotMode(!autoBotMode)}
-              className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 cursor-pointer border transition-colors ${
-                autoBotMode
-                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-white/10'
-              }`}
-            >
-              <Bot className="w-3.5 h-3.5" />
-              <span>{autoBotMode ? 'Yapay Zeka Açık' : 'Yapay Zeka Rakip'}</span>
-            </button>
-
-            <button
-              onClick={handleReset}
-              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer border border-white/10"
-              title="Oyunu Sıfırla"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </div>
-
-        {isSearchingQuick && (
-          <div className="p-3 rounded-xl bg-blue-950/60 border border-blue-500/40 flex items-center justify-between text-xs animate-pulse">
-            <div className="flex items-center gap-2 text-blue-300 font-semibold">
-              <Radio className="w-4 h-4 animate-spin" />
-              <span>Çevrim içi strateji rakibi aranıyor... Başka bir oyuncu katıldığında maç anında başlayacaktır!</span>
-            </div>
-            <button
-              onClick={() => setAutoBotMode(true)}
-              className="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] cursor-pointer"
-            >
-              Bot ile Oyna
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Players & Turn Status Header */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-[#131B2E] border border-white/10 rounded-xl p-3.5 items-center">
-        {/* Blue Team */}
-        <div
-          className={`p-2.5 rounded-lg border flex items-center justify-between ${
-            mySide === 'BLUE' ? 'bg-blue-950/40 border-blue-500/50 ring-1 ring-blue-500/30' : 'bg-slate-900/50 border-white/5'
-          }`}
-        >
-          <div className="flex items-center gap-2">
-            <span className="w-3.5 h-3.5 rounded-full bg-blue-500 shadow-[0_0_8px_#3B82F6]" />
-            <div>
-              <p className="text-xs font-bold text-white">Mavi Birlik {mySide === 'BLUE' && '(SEN)'}</p>
-              <p className="text-[11px] text-slate-400">
-                Bölge: <span className="font-mono font-bold text-blue-400">{roomData?.blueScore || 2}</span>
-              </p>
-            </div>
-          </div>
-          <Shield className="w-4 h-4 text-blue-400" />
-        </div>
-
-        {/* Match Center Banner */}
         <div className="text-center relative">
           {floatingEmoji && (
             <div className="absolute -top-7 left-1/2 -translate-x-1/2 text-3xl animate-bounce z-20 pointer-events-none drop-shadow-lg">
               {floatingEmoji.emoji}
             </div>
           )}
-
-          {roomData?.winner ? (
+          {gameState.winner ? (
             <div className="flex flex-col items-center">
               <div className="text-sm font-bold text-emerald-400 flex items-center gap-1.5">
                 <Trophy className="w-4 h-4" />
-                {roomData.winner === 'DRAW' ? 'BERABERLİK!' : `${roomData.winner === 'BLUE' ? 'MAVİ BİRLİK' : 'KIRMIZI LEJYON'} KAZANDI!`}
+                {gameState.winner === 'DRAW' ? 'BERABERLİK!' : `${gameState.winner === 'BLUE' ? 'MAVİ BİRLİK' : 'KIRMIZI LEJYON'} KAZANDI!`}
               </div>
               <button
                 onClick={handleReset}
                 className="mt-1 px-3 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold cursor-pointer"
               >
-                Yeni Maç Başlat
+                Yeni Maç
               </button>
             </div>
           ) : (
             <div>
-              <span className="text-xs text-slate-400">Sıradaki Hamle: </span>
-              <span className={`text-xs font-bold ${roomData?.turn === 'BLUE' ? 'text-blue-400' : 'text-rose-400'}`}>
-                {roomData?.turn === 'BLUE' ? 'MAVİ' : 'KIRMIZI'} {roomData?.turn === mySide ? '(Senin Sıran!)' : ''}
+              <span className="text-xs text-slate-400">Sıra: </span>
+              <span className={`text-xs font-bold ${gameState.turn === 'BLUE' ? 'text-blue-400' : 'text-rose-400'}`}>
+                {gameState.turn === 'BLUE' ? 'MAVİ BİRLİK' : 'KIRMIZI LEJYON'}
+                {playMode === 'SOLO' && gameState.turn === 'RED' && isBotPlaying ? ' (Düşünüyor...)' : ''}
               </span>
-              <p className="text-[10px] text-slate-400 mt-0.5">Komşu = Çoğalma (Yeşil) · 2 Adım = Atlama (Sarı)</p>
+              <p className="text-[10px] text-slate-400 mt-0.5">
+                {activeAbility === 'LASER' ? '⚡ Yok edilecek rakip taşı seç!' : 'Komşu = Çoğalt & Dönüştür · Her tur +1 Enerji'}
+              </p>
             </div>
           )}
         </div>
 
-        {/* Red Team */}
-        <div
-          className={`p-2.5 rounded-lg border flex items-center justify-between ${
-            mySide === 'RED' ? 'bg-rose-950/40 border-rose-500/50 ring-1 ring-rose-500/30' : 'bg-slate-900/50 border-white/5'
-          }`}
-        >
+        <div className="p-2.5 rounded-lg border bg-rose-950/40 border-rose-500/50 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="w-3.5 h-3.5 rounded-full bg-rose-500 shadow-[0_0_8px_#F43F5E]" />
             <div>
-              <p className="text-xs font-bold text-white">Kırmızı Lejyon {mySide === 'RED' && '(SEN)'}</p>
+              <p className="text-xs font-bold text-white">Kırmızı Lejyon</p>
               <p className="text-[11px] text-slate-400">
-                Bölge: <span className="font-mono font-bold text-rose-400">{roomData?.redScore || 2}</span>
+                Bölge: <span className="font-mono font-bold text-rose-400">{gameState.redScore}</span>
               </p>
             </div>
           </div>
-          <Swords className="w-4 h-4 text-rose-400" />
+          <span className="flex items-center gap-1 text-xs font-mono font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/30">
+            <Zap className="w-3 h-3" /> {gameState.redEnergy}
+          </span>
         </div>
       </div>
 
-      {/* Main 8x8 Strategy Board */}
+      {/* Board (8x8) */}
       <div className="bg-[#090D16] border border-white/10 rounded-xl p-4 sm:p-6 flex flex-col items-center justify-center shadow-2xl">
         <div className="grid grid-cols-8 gap-1.5 sm:gap-2 max-w-[480px] w-full aspect-square bg-slate-950 p-2 sm:p-3 rounded-xl border border-white/10 shadow-2xl">
-          {roomData?.board.map((cell, idx) => {
+          {gameState.board.map((cell, idx) => {
             const isSelected = selectedCell === idx;
             const isCloneTarget = activeValidMoves.clones.includes(idx);
             const isJumpTarget = activeValidMoves.jumps.includes(idx);
@@ -548,9 +636,9 @@ export const HexaConquestOnlineGame: React.FC<{
             let bgClass = 'bg-[#131B2E]/80 border-white/5 hover:border-white/20';
 
             if (cell === 'BLUE') {
-              bgClass = 'bg-blue-600/90 border-blue-400 shadow-[0_0_10px_rgba(59,130,246,0.5)]';
+              bgClass = 'bg-blue-600/90 border-blue-400 shadow-[0_0_10px_rgba(59,130,246,0.6)]';
             } else if (cell === 'RED') {
-              bgClass = 'bg-rose-600/90 border-rose-400 shadow-[0_0_10px_rgba(244,63,94,0.5)]';
+              bgClass = 'bg-rose-600/90 border-rose-400 shadow-[0_0_10px_rgba(244,63,94,0.6)]';
             }
 
             if (isSelected) {
@@ -567,8 +655,8 @@ export const HexaConquestOnlineGame: React.FC<{
                 onClick={() => handleCellClick(idx)}
                 className={`w-full h-full rounded-lg border transition-all cursor-pointer flex items-center justify-center font-bold text-xs ${bgClass}`}
               >
-                {cell === 'BLUE' && <span className="w-3.5 h-3.5 sm:w-5 sm:h-5 rounded-full bg-white/95 shadow-md" />}
-                {cell === 'RED' && <span className="w-3.5 h-3.5 sm:w-5 sm:h-5 rounded-full bg-white/95 shadow-md" />}
+                {cell === 'BLUE' && <span className="w-4 h-4 sm:w-5 sm:h-5 rounded-full bg-white/95 shadow-md flex items-center justify-center text-[9px] text-blue-700 font-extrabold">⬡</span>}
+                {cell === 'RED' && <span className="w-4 h-4 sm:w-5 sm:h-5 rounded-full bg-white/95 shadow-md flex items-center justify-center text-[9px] text-rose-700 font-extrabold">⬡</span>}
                 {isCloneTarget && <span className="w-2 h-2 rounded-full bg-emerald-400" />}
                 {isJumpTarget && <span className="w-2 h-2 rounded-full bg-amber-400" />}
               </button>
@@ -576,9 +664,9 @@ export const HexaConquestOnlineGame: React.FC<{
           })}
         </div>
 
-        {/* Live Reaction Emojis Toolbar */}
+        {/* Emojis & Reset */}
         <div className="flex items-center gap-2 mt-4 pt-3 border-t border-white/10">
-          <span className="text-[11px] font-semibold text-slate-400 mr-1">Reaksiyon Gönder:</span>
+          <span className="text-[11px] font-semibold text-slate-400 mr-1">Reaksiyon:</span>
           {['🔥', '👑', '😎', '💀', '😱', '👏'].map((em) => (
             <button
               key={em}
@@ -588,6 +676,12 @@ export const HexaConquestOnlineGame: React.FC<{
               {em}
             </button>
           ))}
+          <button
+            onClick={handleReset}
+            className="ml-auto px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-bold text-slate-200 border border-white/10 flex items-center gap-1 cursor-pointer"
+          >
+            <RotateCcw className="w-3.5 h-3.5" /> Sıfırla
+          </button>
         </div>
       </div>
     </div>
