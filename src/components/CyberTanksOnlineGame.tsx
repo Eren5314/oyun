@@ -14,6 +14,9 @@ import {
   Trophy,
   Swords,
   Users,
+  PlusCircle,
+  Link,
+  Radio,
 } from 'lucide-react';
 import { sound } from '../utils/sound';
 
@@ -90,11 +93,14 @@ export const CyberTanksOnlineGame: React.FC<{
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Networking state
+  const [matchMode, setMatchMode] = useState<'QUICK' | 'CUSTOM'>('CUSTOM');
   const [roomCodeInput, setRoomCodeInput] = useState('TANK1');
   const [currentRoomCode, setCurrentRoomCode] = useState('TANK1');
   const [isConnected, setIsConnected] = useState(false);
+  const [isSearchingQuick, setIsSearchingQuick] = useState(false);
   const [roomData, setRoomData] = useState<TankRoomData | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
   const [myPlayerId] = useState(() => 'TK_' + Math.random().toString(36).substring(2, 8).toUpperCase());
   const [isBotEnabled, setIsBotEnabled] = useState(false);
   const [floatingEmoji, setFloatingEmoji] = useState<{ emoji: string; id: number } | null>(null);
@@ -200,9 +206,11 @@ export const CyberTanksOnlineGame: React.FC<{
 
   // Connect to WebSocket room
   const connectWs = useCallback(
-    (code: string) => {
+    (action: 'QUICK' | 'CUSTOM', code: string) => {
       if (wsRef.current) {
-        wsRef.current.close();
+        try {
+          wsRef.current.close();
+        } catch {}
       }
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -212,22 +220,38 @@ export const CyberTanksOnlineGame: React.FC<{
 
       ws.onopen = () => {
         setIsConnected(true);
-        ws.send(
-          JSON.stringify({
-            type: 'TANK_JOIN_ROOM',
-            code,
-            playerId: myPlayerId,
-            name: myTankName,
-          })
-        );
+        if (action === 'QUICK') {
+          setIsSearchingQuick(true);
+          ws.send(
+            JSON.stringify({
+              type: 'TANK_QUICK_MATCH',
+              playerId: myPlayerId,
+              name: myTankName,
+            })
+          );
+        } else {
+          setIsSearchingQuick(false);
+          ws.send(
+            JSON.stringify({
+              type: 'TANK_JOIN_ROOM',
+              code,
+              playerId: myPlayerId,
+              name: myTankName,
+            })
+          );
+        }
       };
 
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
 
-          if (msg.type === 'TANK_ROOM_UPDATE') {
+          if (msg.type === 'TANK_QUEUE_WAITING') {
+            setIsSearchingQuick(true);
+          } else if (msg.type === 'TANK_ROOM_UPDATE') {
+            setIsSearchingQuick(false);
             setRoomData(msg);
+            setCurrentRoomCode(msg.code);
             const st = gameStateRef.current;
             st.status = msg.status;
             st.round = msg.round;
@@ -285,23 +309,27 @@ export const CyberTanksOnlineGame: React.FC<{
 
       ws.onclose = () => {
         setIsConnected(false);
-        setTimeout(() => {
-          if (wsRef.current === ws) {
-            connectWs(code);
-          }
-        }, 1500);
       };
       ws.onerror = () => setIsConnected(false);
     },
-    [myPlayerId, mySlot, onScoreUpdate]
+    [myPlayerId, mySlot, myTankName, onScoreUpdate]
   );
 
   useEffect(() => {
-    connectWs(currentRoomCode);
+    const params = new URLSearchParams(window.location.search);
+    const roomParam = params.get('room');
+    if (roomParam) {
+      setRoomCodeInput(roomParam);
+      setCurrentRoomCode(roomParam);
+      connectWs('CUSTOM', roomParam);
+    } else {
+      connectWs('CUSTOM', currentRoomCode);
+    }
+
     return () => {
       if (wsRef.current) wsRef.current.close();
     };
-  }, [connectWs, currentRoomCode]);
+  }, []);
 
   // Reset arena state for new round
   const resetRoundArena = useCallback(() => {
@@ -1047,9 +1075,44 @@ export const CyberTanksOnlineGame: React.FC<{
 
   // Quick Match generator
   const handleQuickMatch = () => {
-    const randomCode = 'TANK' + Math.floor(1 + Math.random() * 99);
-    setRoomCodeInput(randomCode);
-    setCurrentRoomCode(randomCode);
+    setMatchMode('QUICK');
+    connectWs('QUICK', 'QUICK');
+    sound.playScore();
+  };
+
+  const handleCreateCustomRoom = () => {
+    const code = 'TANK-' + Math.floor(1000 + Math.random() * 9000);
+    setRoomCodeInput(code);
+    setCurrentRoomCode(code);
+    setMatchMode('CUSTOM');
+    connectWs('CUSTOM', code);
+    sound.playScore();
+  };
+
+  const handleJoinCustomRoom = () => {
+    if (!roomCodeInput.trim()) return;
+    const clean = roomCodeInput.trim().toUpperCase();
+    setCurrentRoomCode(clean);
+    setMatchMode('CUSTOM');
+    connectWs('CUSTOM', clean);
+    sound.playScore();
+  };
+
+  const copyCode = () => {
+    const code = roomData?.code || currentRoomCode;
+    navigator.clipboard.writeText(code);
+    setCopiedCode(true);
+    sound.playScore();
+    setTimeout(() => setCopiedCode(false), 1500);
+  };
+
+  const copyInviteLink = () => {
+    const code = roomData?.code || currentRoomCode;
+    const url = `${window.location.origin}${window.location.pathname}?game=cyber-tanks&room=${code}`;
+    navigator.clipboard.writeText(url);
+    setCopiedLink(true);
+    sound.playScore();
+    setTimeout(() => setCopiedLink(false), 1500);
   };
 
   const myPlayerInfo = roomData?.players.find((p) => p.id === myPlayerId);
@@ -1058,76 +1121,135 @@ export const CyberTanksOnlineGame: React.FC<{
   return (
     <div className="flex flex-col gap-4 select-none">
       {/* Top Matchmaking & Room Management Bar */}
-      <div className="bg-[#131B2E] border border-white/10 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3 shadow-lg">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 text-xs">
+      <div className="bg-[#131B2E] border border-white/10 rounded-2xl p-4 flex flex-col gap-3 shadow-lg">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Crosshair className="w-5 h-5 text-sky-400" />
+            <div>
+              <h3 className="font-extrabold text-white text-sm">SİBER TANKLAR: 1V1 CANLI DÜELLO</h3>
+              <p className="text-xs text-slate-400">
+                Lazerli tank savaşı! Hızlı eşleşin veya arkadaşınıza özel oda açın.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
             {isConnected ? (
-              <span className="flex items-center gap-1 text-emerald-400 font-semibold">
-                <Wifi className="w-3.5 h-3.5" /> Canlı Sunucu Bağlı
+              <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                <Wifi className="w-3.5 h-3.5 animate-pulse" /> Canlı Sunucu Aktif
               </span>
             ) : (
-              <span className="flex items-center gap-1 text-rose-400 font-semibold">
+              <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-rose-500/20 text-rose-400 border border-rose-500/30">
                 <WifiOff className="w-3.5 h-3.5" /> Bağlantı Kesildi
               </span>
             )}
           </div>
-          <span aria-hidden="true" className="text-slate-600">·</span>
-          <div className="flex items-center gap-2 text-xs text-slate-300">
-            <span>Oda Kodu:</span>
-            <div className="flex items-center gap-1.5 bg-slate-900 border border-white/10 px-2.5 py-1 rounded font-mono font-bold text-sky-400">
-              {roomData?.code || currentRoomCode}
-            </div>
+        </div>
+
+        {/* Action Controls Row */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-2 border-t border-white/10">
+          <button
+            onClick={handleQuickMatch}
+            className={`py-2 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all shadow-md ${
+              matchMode === 'QUICK'
+                ? 'bg-sky-600 text-white shadow-sky-600/30 ring-1 ring-sky-400'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-white/10'
+            }`}
+          >
+            <Zap className="w-4 h-4 text-amber-400" />
+            <span>Hızlı Eşleşme (Rastgele)</span>
+          </button>
+
+          <button
+            onClick={handleCreateCustomRoom}
+            className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-white/10 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-sm"
+          >
+            <PlusCircle className="w-4 h-4 text-emerald-400" />
+            <span>Özel Oda Oluştur</span>
+          </button>
+
+          <div className="flex items-center gap-1.5">
+            <input
+              type="text"
+              value={roomCodeInput}
+              onChange={(e) => setRoomCodeInput(e.target.value.toUpperCase())}
+              placeholder="Oda Kodu"
+              maxLength={10}
+              className="flex-1 px-2.5 py-1.5 bg-slate-900 border border-white/15 rounded-xl text-xs font-mono font-bold text-white uppercase focus:outline-none focus:border-sky-500"
+            />
             <button
-              onClick={() => {
-                navigator.clipboard.writeText(roomData?.code || currentRoomCode);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1500);
-              }}
-              className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
-              title="Kodu Kopyala"
+              onClick={handleJoinCustomRoom}
+              className="px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs cursor-pointer transition-colors shadow-sm"
             >
-              {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+              Katıl
             </button>
           </div>
         </div>
 
-        {/* Room Join & Quick Match */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleQuickMatch}
-            className="px-3 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold cursor-pointer shadow-sm transition-colors"
-          >
-            Hızlı Eşleşme
-          </button>
-          <input
-            type="text"
-            value={roomCodeInput}
-            onChange={(e) => setRoomCodeInput(e.target.value.toUpperCase())}
-            placeholder="ODA KODU"
-            maxLength={8}
-            className="w-24 px-2 py-1 bg-slate-900 border border-white/10 rounded text-xs font-mono font-bold text-white uppercase focus:outline-none focus:border-sky-500"
-          />
-          <button
-            onClick={() => {
-              if (roomCodeInput.trim()) setCurrentRoomCode(roomCodeInput.trim());
-            }}
-            className="px-3 py-1 rounded bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold cursor-pointer shadow-sm transition-colors"
-          >
-            Katıl
-          </button>
-          <button
-            onClick={() => setIsBotEnabled(!isBotEnabled)}
-            className={`px-3 py-1 rounded text-xs font-semibold flex items-center gap-1.5 cursor-pointer border transition-colors ${
-              isBotEnabled
-                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-white/10'
-            }`}
-            title="Yapay Zeka Botunu Aktif/Pasif Yap"
-          >
-            <Bot className="w-3.5 h-3.5" />
-            <span>{isBotEnabled ? 'Bot Devrede' : 'Yapay Zeka Rakip'}</span>
-          </button>
+        {/* Active Room Code & Invite Link Bar */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-white/10 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-slate-400 font-medium">Aktif Oda:</span>
+            <span className="px-2.5 py-0.5 rounded-md bg-slate-900 border border-white/10 font-mono font-bold text-sky-400">
+              {roomData?.code || currentRoomCode}
+            </span>
+            <button
+              onClick={copyCode}
+              className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+              title="Kodu Kopyala"
+            >
+              {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+            </button>
+            <button
+              onClick={copyInviteLink}
+              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer flex items-center gap-1 text-[11px]"
+              title="Davet Linki Kopyala"
+            >
+              {copiedLink ? <Check className="w-3 h-3 text-emerald-400" /> : <Link className="w-3 h-3" />}
+              <span>{copiedLink ? 'Link Alındı!' : 'Davet Linki'}</span>
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsBotEnabled(!isBotEnabled)}
+              className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 cursor-pointer border transition-colors ${
+                isBotEnabled
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-white/10'
+              }`}
+            >
+              <Bot className="w-3.5 h-3.5" />
+              <span>{isBotEnabled ? 'Yapay Zeka Devrede' : 'Yapay Zeka Rakip'}</span>
+            </button>
+
+            <button
+              onClick={toggleReady}
+              className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer shadow-md ${
+                isMyReady
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                  : 'bg-sky-600 hover:bg-sky-500 text-white'
+              }`}
+            >
+              {isMyReady ? '✓ HAZIRSIN' : 'HAZIR OL!'}
+            </button>
+          </div>
         </div>
+
+        {isSearchingQuick && (
+          <div className="p-3 rounded-xl bg-sky-950/60 border border-sky-500/40 flex items-center justify-between text-xs animate-pulse">
+            <div className="flex items-center gap-2 text-sky-300 font-semibold">
+              <Radio className="w-4 h-4 animate-spin" />
+              <span>Çevrim içi tankçı aranıyor... Başka bir oyuncu katıldığında düello otomatik başlayacak!</span>
+            </div>
+            <button
+              onClick={() => setIsBotEnabled(true)}
+              className="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] cursor-pointer"
+            >
+              Bot ile Kapış
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Players Header & Scoreboard */}

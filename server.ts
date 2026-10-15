@@ -40,22 +40,64 @@ try {
 function saveUsers() {
   try {
     fs.writeFileSync(USERS_FILE, JSON.stringify(usersDb, null, 2), 'utf-8');
-  } catch {}
+  } catch (err) {
+    console.error('Failed to save users_db.json', err);
+  }
 }
 
+// User Registration endpoint
 app.post('/api/auth/register', (req, res) => {
-  const { username, password, avatar } = req.body || {};
+  const { username, password, avatar, overwrite } = req.body || {};
   if (!username || typeof username !== 'string' || username.trim().length < 3) {
     return res.status(400).json({ error: 'Kullanıcı adı en az 3 karakter olmalıdır.' });
   }
   if (!password || typeof password !== 'string' || password.length < 4) {
     return res.status(400).json({ error: 'Parola en az 4 karakter olmalıdır.' });
   }
+
   const cleanUsername = username.trim();
   const lowerKey = cleanUsername.toLowerCase();
-  if (usersDb[lowerKey]) {
-    return res.status(409).json({ error: 'Bu kullanıcı adı zaten alınmış! Lütfen başka bir ad seçin.' });
+  const existing = usersDb[lowerKey];
+
+  if (existing) {
+    // If the password matches, simply log them in!
+    if (existing.password === password) {
+      if (avatar) existing.avatar = avatar;
+      saveUsers();
+      return res.json({
+        success: true,
+        isExistingLogin: true,
+        user: {
+          username: existing.username,
+          avatar: existing.avatar,
+          records: existing.records,
+        },
+      });
+    }
+
+    // If overwrite is requested (reset / takeover)
+    if (overwrite === true) {
+      existing.password = password;
+      if (avatar) existing.avatar = avatar;
+      saveUsers();
+      return res.json({
+        success: true,
+        overwritten: true,
+        user: {
+          username: existing.username,
+          avatar: existing.avatar,
+          records: existing.records,
+        },
+      });
+    }
+
+    return res.status(409).json({
+      error: 'Bu kullanıcı adı zaten kayıtlı!',
+      exists: true,
+      username: existing.username,
+    });
   }
+
   const newUser: UserAccount = {
     username: cleanUsername,
     password,
@@ -67,8 +109,10 @@ app.post('/api/auth/register', (req, res) => {
       'cyber-tanks': 0,
     },
   };
+
   usersDb[lowerKey] = newUser;
   saveUsers();
+
   return res.json({
     success: true,
     user: {
@@ -79,16 +123,32 @@ app.post('/api/auth/register', (req, res) => {
   });
 });
 
+// User Login endpoint
 app.post('/api/auth/login', (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ error: 'Kullanıcı adı ve parola zorunludur.' });
   }
-  const lowerKey = String(username).trim().toLowerCase();
+
+  const cleanUsername = String(username).trim();
+  const lowerKey = cleanUsername.toLowerCase();
   const existing = usersDb[lowerKey];
-  if (!existing || existing.password !== password) {
-    return res.status(401).json({ error: 'Kullanıcı adı veya parola hatalı!' });
+
+  if (!existing) {
+    return res.status(404).json({
+      error: 'Bu kullanıcı adına ait bir hesap bulunamadı.',
+      notFound: true,
+      suggestedUsername: cleanUsername,
+    });
   }
+
+  if (existing.password !== password) {
+    return res.status(401).json({
+      error: 'Girilen parola hatalı!',
+      wrongPassword: true,
+    });
+  }
+
   return res.json({
     success: true,
     user: {
@@ -99,9 +159,37 @@ app.post('/api/auth/login', (req, res) => {
   });
 });
 
+// Reset Password endpoint
+app.post('/api/auth/reset', (req, res) => {
+  const { username, newPassword } = req.body || {};
+  if (!username || !newPassword || newPassword.length < 4) {
+    return res.status(400).json({ error: 'Geçersiz parametreler' });
+  }
+
+  const lowerKey = String(username).trim().toLowerCase();
+  const existing = usersDb[lowerKey];
+  if (!existing) {
+    return res.status(404).json({ error: 'Kullanıcı bulunamadı' });
+  }
+
+  existing.password = newPassword;
+  saveUsers();
+
+  return res.json({
+    success: true,
+    user: {
+      username: existing.username,
+      avatar: existing.avatar,
+      records: existing.records,
+    },
+  });
+});
+
+// Update score
 app.post('/api/auth/update-score', (req, res) => {
   const { username, gameId, score } = req.body || {};
   if (!username || !gameId) return res.status(400).json({ error: 'Eksik parametre' });
+
   const lowerKey = String(username).trim().toLowerCase();
   const user = usersDb[lowerKey];
   if (user) {
@@ -113,11 +201,14 @@ app.post('/api/auth/update-score', (req, res) => {
   return res.status(404).json({ error: 'Kullanıcı bulunamadı' });
 });
 
+// ==========================================
+// HTTP SERVER & WEBSOCKET SETUP
+// ==========================================
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// Keep-alive heartbeat every 20 seconds to prevent Cloud Run idle drop
-const heartbeatInterval = setInterval(() => {
+// Keep-alive heartbeat every 20 seconds
+setInterval(() => {
   wss.clients.forEach((client) => {
     if ((client as any).isAlive === false) {
       return client.terminate();
@@ -127,65 +218,9 @@ const heartbeatInterval = setInterval(() => {
   });
 }, 20000);
 
-interface Player {
-  ws: WebSocket;
-  id: string;
-  name: string;
-  side: 'BLUE' | 'RED';
-}
-
-interface Room {
-  code: string;
-  players: Player[];
-  board: Array<('BLUE' | 'RED' | null)>; // 8x8 grid (64 cells)
-  turn: 'BLUE' | 'RED';
-  winner: 'BLUE' | 'RED' | 'DRAW' | null;
-  blueScore: number;
-  redScore: number;
-}
-
-const rooms = new Map<string, Room>();
-
-function countPieces(board: Array<('BLUE' | 'RED' | null)>) {
-  let blue = 0;
-  let red = 0;
-  board.forEach((cell) => {
-    if (cell === 'BLUE') blue++;
-    if (cell === 'RED') red++;
-  });
-  return { blue, red };
-}
-
-function broadcastRoom(room: Room) {
-  const payload = JSON.stringify({
-    type: 'ROOM_UPDATE',
-    code: room.code,
-    players: room.players.map((p) => ({ id: p.id, name: p.name, side: p.side })),
-    board: room.board,
-    turn: room.turn,
-    winner: room.winner,
-    blueScore: room.blueScore,
-    redScore: room.redScore,
-  });
-
-  room.players.forEach((p) => {
-    if (p.ws.readyState === WebSocket.OPEN) {
-      p.ws.send(payload);
-    }
-  });
-}
-
-function initBoard(): Array<('BLUE' | 'RED' | null)> {
-  const board: Array<('BLUE' | 'RED' | null)> = new Array(64).fill(null);
-  // Initial Hex/Grid Territory pieces
-  board[0] = 'BLUE';
-  board[7] = 'RED';
-  board[56] = 'RED';
-  board[63] = 'BLUE';
-  return board;
-}
-
-// Geometry Dash Online Duel Rooms
+// ==========================================
+// GAME 1: GEOMETRY DASH DUEL PROTOCOL
+// ==========================================
 interface GDPerson {
   ws: WebSocket;
   id: string;
@@ -202,6 +237,7 @@ interface GDRoom {
   status: 'LOBBY' | 'COUNTDOWN' | 'RACING' | 'FINISHED';
   winner: 'P1' | 'P2' | null;
   seed: number;
+  countdownTimer?: NodeJS.Timeout;
 }
 
 const gdRooms = new Map<string, GDRoom>();
@@ -231,8 +267,87 @@ function broadcastGDRoom(room: GDRoom, extraData?: any) {
   });
 }
 
+function startGDRoomCountdown(room: GDRoom) {
+  if (room.countdownTimer) clearInterval(room.countdownTimer);
+  room.status = 'COUNTDOWN';
+  let count = 3;
+  broadcastGDRoom(room, { countdown: count, matchFound: true });
+
+  room.countdownTimer = setInterval(() => {
+    count--;
+    if (count > 0) {
+      broadcastGDRoom(room, { countdown: count });
+    } else {
+      if (room.countdownTimer) clearInterval(room.countdownTimer);
+      room.status = 'RACING';
+      broadcastGDRoom(room, { countdown: 0 });
+    }
+  }, 1000);
+}
+
 // ==========================================
-// SIBER TANKLAR (CYBER TANKS) ONLINE PROTOCOL
+// GAME 2: HEXA CONQUEST STRATEGY PROTOCOL
+// ==========================================
+interface HexaPlayer {
+  ws: WebSocket;
+  id: string;
+  name: string;
+  side: 'BLUE' | 'RED';
+}
+
+interface Room {
+  code: string;
+  players: HexaPlayer[];
+  board: Array<'BLUE' | 'RED' | null>; // 64 cells
+  turn: 'BLUE' | 'RED';
+  winner: 'BLUE' | 'RED' | 'DRAW' | null;
+  blueScore: number;
+  redScore: number;
+}
+
+const rooms = new Map<string, Room>();
+
+function initBoard(): Array<'BLUE' | 'RED' | null> {
+  const board: Array<'BLUE' | 'RED' | null> = new Array(64).fill(null);
+  board[0] = 'BLUE';
+  board[7] = 'RED';
+  board[56] = 'RED';
+  board[63] = 'BLUE';
+  return board;
+}
+
+function countPieces(board: Array<'BLUE' | 'RED' | null>) {
+  let blue = 0;
+  let red = 0;
+  board.forEach((cell) => {
+    if (cell === 'BLUE') blue++;
+    if (cell === 'RED') red++;
+  });
+  return { blue, red };
+}
+
+function broadcastRoom(room: Room, extra?: any) {
+  const payload = JSON.stringify({
+    type: 'ROOM_UPDATE',
+    code: room.code,
+    players: room.players.map((p) => ({ id: p.id, name: p.name, side: p.side })),
+    board: room.board,
+    turn: room.turn,
+    winner: room.winner,
+    blueScore: room.blueScore,
+    redScore: room.redScore,
+    ...extra,
+  });
+
+  room.players.forEach((p) => {
+    if (p.ws.readyState === WebSocket.OPEN) {
+      p.ws.send(payload);
+    }
+  });
+}
+
+// ==========================================
+// GAME 3: CYBER TANKS PROTOCOL
 // ==========================================
 interface TankPlayer {
   ws: WebSocket;
@@ -252,6 +367,7 @@ interface TankRoom {
   winner: 'P1' | 'P2' | null;
   roundWinner: 'P1' | 'P2' | null;
   mapSeed: number;
+  countdownTimer?: NodeJS.Timeout;
 }
 
 const tankRooms = new Map<string, TankRoom>();
@@ -283,8 +399,26 @@ function broadcastTankRoom(room: TankRoom, extraData?: any) {
   });
 }
 
+function startTankRoomCountdown(room: TankRoom) {
+  if (room.countdownTimer) clearInterval(room.countdownTimer);
+  room.status = 'COUNTDOWN';
+  let cd = 3;
+  broadcastTankRoom(room, { countdown: cd, matchFound: true });
+
+  room.countdownTimer = setInterval(() => {
+    cd--;
+    if (cd > 0) {
+      broadcastTankRoom(room, { countdown: cd });
+    } else {
+      if (room.countdownTimer) clearInterval(room.countdownTimer);
+      room.status = 'BATTLE';
+      broadcastTankRoom(room, { countdown: 0 });
+    }
+  }, 1000);
+}
+
 // ==========================================
-// REAL-TIME MATCHMAKING QUEUES
+// MATCHMAKING QUEUES
 // ==========================================
 interface QueuePlayer {
   ws: WebSocket;
@@ -295,36 +429,39 @@ interface QueuePlayer {
 }
 
 let gdQueue: QueuePlayer[] = [];
-let tankQueue: QueuePlayer[] = [];
 let hexaQueue: QueuePlayer[] = [];
+let tankQueue: QueuePlayer[] = [];
 
-wss.on('connection', (ws) => {
-  (ws as any).isAlive = true;
+// ==========================================
+// WEBSOCKET CONNECTION DISPATCHER
+// ==========================================
+wss.on('connection', (ws: WebSocket) => {
+  const client = ws as any;
+  client.isAlive = true;
+  client.myPlayerId = '';
+  client.currentGDRoom = null as GDRoom | null;
+  client.currentRoom = null as Room | null;
+  client.currentTankRoom = null as TankRoom | null;
+
   ws.on('pong', () => {
-    (ws as any).isAlive = true;
+    client.isAlive = true;
   });
-
-  let currentRoom: Room | null = null;
-  let currentGDRoom: GDRoom | null = null;
-  let currentTankRoom: TankRoom | null = null;
-  let myPlayerId = '';
 
   ws.on('message', (raw) => {
     try {
       const data = JSON.parse(raw.toString());
 
       // ==========================================
-      // GEOMETRY DASH ONLINE WEBSOCKET PROTOCOL
+      // 1. GEOMETRY DASH ONLINE PROTOCOL
       // ==========================================
       if (data.type === 'GD_QUICK_MATCH') {
-        myPlayerId = data.playerId || Math.random().toString(36).substring(2, 9);
-        const playerName = data.name || 'Koşucu ' + myPlayerId.slice(0, 4);
+        client.myPlayerId = data.playerId || 'P_' + Math.random().toString(36).substring(2, 8).toUpperCase();
+        const playerName = data.name || 'Koşucu ' + client.myPlayerId.slice(2, 6);
 
-        // Filter closed sockets from queue
-        gdQueue = gdQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== myPlayerId);
+        // Filter inactive sockets from queue
+        gdQueue = gdQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== client.myPlayerId);
 
         if (gdQueue.length > 0) {
-          // Instant Match Found!
           const opponent = gdQueue.shift()!;
           const matchCode = 'DUEL_' + Math.floor(1000 + Math.random() * 9000);
           const room: GDRoom = {
@@ -341,7 +478,7 @@ wss.on('connection', (ws) => {
               },
               {
                 ws: ws,
-                id: myPlayerId,
+                id: client.myPlayerId,
                 name: playerName,
                 slot: 'P2',
                 cosmetics: data.cosmetics || {},
@@ -353,17 +490,19 @@ wss.on('connection', (ws) => {
             winner: null,
             seed: Math.floor(Math.random() * 100000),
           };
+
           gdRooms.set(matchCode, room);
-          currentGDRoom = room;
-          broadcastGDRoom(room, {
-            countdown: 3,
-            matchFound: true,
-          });
+
+          // Connect both sockets to the room
+          (opponent.ws as any).currentGDRoom = room;
+          (opponent.ws as any).myPlayerId = opponent.id;
+          client.currentGDRoom = room;
+
+          startGDRoomCountdown(room);
         } else {
-          // Add to queue and wait
           gdQueue.push({
             ws,
-            id: myPlayerId,
+            id: client.myPlayerId,
             name: playerName,
             cosmetics: data.cosmetics || {},
             timestamp: Date.now(),
@@ -371,16 +510,15 @@ wss.on('connection', (ws) => {
           ws.send(JSON.stringify({ type: 'GD_QUEUE_WAITING', message: 'Çevrim içi rakip aranıyor...' }));
         }
       } else if (data.type === 'GD_LEAVE_QUEUE') {
-        gdQueue = gdQueue.filter((qp) => qp.id !== myPlayerId);
+        gdQueue = gdQueue.filter((qp) => qp.id !== client.myPlayerId);
       } else if (data.type === 'GD_JOIN_ROOM') {
-        const roomCode = (data.code || 'GD1').toUpperCase().trim().slice(0, 8);
-        myPlayerId = data.playerId || Math.random().toString(36).substring(2, 9);
-        const playerName = data.name || 'Koşucu ' + myPlayerId.slice(0, 4);
+        const roomCode = (data.code || 'GD1').toUpperCase().trim().slice(0, 10);
+        client.myPlayerId = data.playerId || 'P_' + Math.random().toString(36).substring(2, 8).toUpperCase();
+        const playerName = data.name || 'Koşucu ' + client.myPlayerId.slice(2, 6);
 
-        // If code is QUICK, route to quick match
         if (roomCode === 'QUICK') {
-          // Trigger quick match directly
-          gdQueue = gdQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== myPlayerId);
+          // Route to quick match
+          gdQueue = gdQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== client.myPlayerId);
           if (gdQueue.length > 0) {
             const opponent = gdQueue.shift()!;
             const matchCode = 'DUEL_' + Math.floor(1000 + Math.random() * 9000);
@@ -398,7 +536,7 @@ wss.on('connection', (ws) => {
                 },
                 {
                   ws: ws,
-                  id: myPlayerId,
+                  id: client.myPlayerId,
                   name: playerName,
                   slot: 'P2',
                   cosmetics: data.cosmetics || {},
@@ -411,11 +549,14 @@ wss.on('connection', (ws) => {
               seed: Math.floor(Math.random() * 100000),
             };
             gdRooms.set(matchCode, room);
-            currentGDRoom = room;
-            broadcastGDRoom(room, { countdown: 3, matchFound: true });
+            (opponent.ws as any).currentGDRoom = room;
+            (opponent.ws as any).myPlayerId = opponent.id;
+            client.currentGDRoom = room;
+
+            startGDRoomCountdown(room);
             return;
           } else {
-            gdQueue.push({ ws, id: myPlayerId, name: playerName, cosmetics: data.cosmetics || {}, timestamp: Date.now() });
+            gdQueue.push({ ws, id: client.myPlayerId, name: playerName, cosmetics: data.cosmetics || {}, timestamp: Date.now() });
             ws.send(JSON.stringify({ type: 'GD_QUEUE_WAITING', message: 'Çevrim içi rakip aranıyor...' }));
             return;
           }
@@ -433,9 +574,9 @@ wss.on('connection', (ws) => {
           gdRooms.set(roomCode, room);
         }
 
-        currentGDRoom = room;
+        client.currentGDRoom = room;
 
-        let existing = room.players.find((p) => p.id === myPlayerId);
+        let existing = room.players.find((p) => p.id === client.myPlayerId);
         if (!existing) {
           if (room.players.length >= 2) {
             ws.send(JSON.stringify({ type: 'GD_ERROR', message: 'Oda dolu! (Maksimum 2 oyuncu)' }));
@@ -444,7 +585,7 @@ wss.on('connection', (ws) => {
           const slot: 'P1' | 'P2' = room.players.some((p) => p.slot === 'P1') ? 'P2' : 'P1';
           existing = {
             ws,
-            id: myPlayerId,
+            id: client.myPlayerId,
             name: playerName,
             slot,
             cosmetics: data.cosmetics || {},
@@ -458,30 +599,32 @@ wss.on('connection', (ws) => {
           existing.cosmetics = data.cosmetics || existing.cosmetics;
         }
 
+        room.players.forEach((p) => {
+          (p.ws as any).currentGDRoom = room;
+          (p.ws as any).myPlayerId = p.id;
+        });
+
         broadcastGDRoom(room);
-      } else if (data.type === 'GD_TOGGLE_READY' && currentGDRoom) {
-        const player = currentGDRoom.players.find((p) => p.id === myPlayerId);
+
+        if (room.players.length === 2 && room.players.every((p) => p.ready)) {
+          startGDRoomCountdown(room);
+        }
+      } else if (data.type === 'GD_TOGGLE_READY' && client.currentGDRoom) {
+        const room = client.currentGDRoom;
+        const player = room.players.find((p: GDPerson) => p.id === client.myPlayerId);
         if (player) {
           player.ready = !player.ready;
-          // If both players ready, start countdown
-          if (currentGDRoom.players.length === 2 && currentGDRoom.players.every((p) => p.ready)) {
-            currentGDRoom.status = 'COUNTDOWN';
-            currentGDRoom.winner = null;
-            currentGDRoom.seed = Math.floor(Math.random() * 100000);
-            currentGDRoom.players.forEach((p) => {
-              p.lives = 5;
-            });
-            broadcastGDRoom(currentGDRoom, { countdown: 3 });
-          } else {
-            broadcastGDRoom(currentGDRoom);
+          broadcastGDRoom(room);
+          if (room.players.length === 2 && room.players.every((p: GDPerson) => p.ready)) {
+            startGDRoomCountdown(room);
           }
         }
-      } else if (data.type === 'GD_START_RACE' && currentGDRoom) {
-        currentGDRoom.status = 'RACING';
-        broadcastGDRoom(currentGDRoom);
-      } else if (data.type === 'GD_SYNC_POS' && currentGDRoom) {
-        // High frequency position relay to opponent
-        const opponent = currentGDRoom.players.find((p) => p.id !== myPlayerId);
+      } else if (data.type === 'GD_START_RACE' && client.currentGDRoom) {
+        client.currentGDRoom.status = 'RACING';
+        broadcastGDRoom(client.currentGDRoom);
+      } else if (data.type === 'GD_SYNC_POS' && client.currentGDRoom) {
+        const room = client.currentGDRoom;
+        const opponent = room.players.find((p: GDPerson) => p.id !== client.myPlayerId);
         if (opponent && opponent.ws.readyState === WebSocket.OPEN) {
           opponent.ws.send(
             JSON.stringify({
@@ -496,44 +639,45 @@ wss.on('connection', (ws) => {
             })
           );
         }
-      } else if (data.type === 'GD_CRASH' && currentGDRoom) {
-        const player = currentGDRoom.players.find((p) => p.id === myPlayerId);
+      } else if (data.type === 'GD_CRASH' && client.currentGDRoom) {
+        const room = client.currentGDRoom;
+        const player = room.players.find((p: GDPerson) => p.id === client.myPlayerId);
         if (player) {
           player.lives = Math.max(0, data.lives);
-          if (player.lives <= 0 && currentGDRoom.status === 'RACING') {
-            currentGDRoom.status = 'FINISHED';
-            const winnerPlayer = currentGDRoom.players.find((p) => p.id !== myPlayerId);
-            currentGDRoom.winner = winnerPlayer ? winnerPlayer.slot : null;
+          if (player.lives <= 0 && room.status === 'RACING') {
+            room.status = 'FINISHED';
+            const winnerPlayer = room.players.find((p: GDPerson) => p.id !== client.myPlayerId);
+            room.winner = winnerPlayer ? winnerPlayer.slot : null;
           }
-          broadcastGDRoom(currentGDRoom);
+          broadcastGDRoom(room);
         }
-      } else if (data.type === 'GD_REMATCH' && currentGDRoom) {
-        currentGDRoom.status = 'COUNTDOWN';
-        currentGDRoom.winner = null;
-        currentGDRoom.seed = Math.floor(Math.random() * 100000);
-        currentGDRoom.players.forEach((p) => {
+      } else if (data.type === 'GD_REMATCH' && client.currentGDRoom) {
+        const room = client.currentGDRoom;
+        room.winner = null;
+        room.seed = Math.floor(Math.random() * 100000);
+        room.players.forEach((p: GDPerson) => {
           p.lives = 5;
           p.ready = true;
         });
-        broadcastGDRoom(currentGDRoom, { countdown: 3 });
+        startGDRoomCountdown(room);
       }
 
       // ==========================================
-      // HEXA CONQUEST PROTOCOL
+      // 2. HEXA CONQUEST STRATEGY PROTOCOL
       // ==========================================
       else if (data.type === 'HEXA_QUICK_MATCH') {
-        myPlayerId = data.playerId || Math.random().toString(36).substring(2, 9);
-        const playerName = data.name || 'Komutan ' + myPlayerId.slice(0, 4);
+        client.myPlayerId = data.playerId || 'P_' + Math.random().toString(36).substring(2, 8).toUpperCase();
+        const playerName = data.name || 'Komutan ' + client.myPlayerId.slice(2, 6);
 
-        hexaQueue = hexaQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== myPlayerId);
+        hexaQueue = hexaQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== client.myPlayerId);
         if (hexaQueue.length > 0) {
           const opponent = hexaQueue.shift()!;
-          const matchCode = 'ARENA_' + Math.floor(1000 + Math.random() * 9000);
+          const matchCode = 'HEXA_' + Math.floor(1000 + Math.random() * 9000);
           const room: Room = {
             code: matchCode,
             players: [
               { ws: opponent.ws, id: opponent.id, name: opponent.name, side: 'BLUE' },
-              { ws, id: myPlayerId, name: playerName, side: 'RED' },
+              { ws, id: client.myPlayerId, name: playerName, side: 'RED' },
             ],
             board: initBoard(),
             turn: 'BLUE',
@@ -542,27 +686,31 @@ wss.on('connection', (ws) => {
             redScore: 2,
           };
           rooms.set(matchCode, room);
-          currentRoom = room;
-          broadcastRoom(room);
+
+          (opponent.ws as any).currentRoom = room;
+          (opponent.ws as any).myPlayerId = opponent.id;
+          client.currentRoom = room;
+
+          broadcastRoom(room, { matchFound: true });
         } else {
-          hexaQueue.push({ ws, id: myPlayerId, name: playerName, timestamp: Date.now() });
+          hexaQueue.push({ ws, id: client.myPlayerId, name: playerName, timestamp: Date.now() });
           ws.send(JSON.stringify({ type: 'HEXA_QUEUE_WAITING', message: 'Strateji rakibi aranıyor...' }));
         }
       } else if (data.type === 'JOIN_ROOM') {
-        const roomCode = (data.code || 'GLOBAL').toUpperCase().trim().slice(0, 8);
-        myPlayerId = data.playerId || Math.random().toString(36).substring(2, 9);
-        const playerName = data.name || 'Komutan ' + myPlayerId.slice(0, 4);
+        const roomCode = (data.code || 'ARENA1').toUpperCase().trim().slice(0, 10);
+        client.myPlayerId = data.playerId || 'P_' + Math.random().toString(36).substring(2, 8).toUpperCase();
+        const playerName = data.name || 'Komutan ' + client.myPlayerId.slice(2, 6);
 
         if (roomCode === 'QUICK') {
-          hexaQueue = hexaQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== myPlayerId);
+          hexaQueue = hexaQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== client.myPlayerId);
           if (hexaQueue.length > 0) {
             const opponent = hexaQueue.shift()!;
-            const matchCode = 'ARENA_' + Math.floor(1000 + Math.random() * 9000);
+            const matchCode = 'HEXA_' + Math.floor(1000 + Math.random() * 9000);
             const room: Room = {
               code: matchCode,
               players: [
                 { ws: opponent.ws, id: opponent.id, name: opponent.name, side: 'BLUE' },
-                { ws, id: myPlayerId, name: playerName, side: 'RED' },
+                { ws, id: client.myPlayerId, name: playerName, side: 'RED' },
               ],
               board: initBoard(),
               turn: 'BLUE',
@@ -571,11 +719,15 @@ wss.on('connection', (ws) => {
               redScore: 2,
             };
             rooms.set(matchCode, room);
-            currentRoom = room;
-            broadcastRoom(room);
+
+            (opponent.ws as any).currentRoom = room;
+            (opponent.ws as any).myPlayerId = opponent.id;
+            client.currentRoom = room;
+
+            broadcastRoom(room, { matchFound: true });
             return;
           } else {
-            hexaQueue.push({ ws, id: myPlayerId, name: playerName, timestamp: Date.now() });
+            hexaQueue.push({ ws, id: client.myPlayerId, name: playerName, timestamp: Date.now() });
             ws.send(JSON.stringify({ type: 'HEXA_QUEUE_WAITING', message: 'Strateji rakibi aranıyor...' }));
             return;
           }
@@ -595,33 +747,37 @@ wss.on('connection', (ws) => {
           rooms.set(roomCode, room);
         }
 
-        currentRoom = room;
+        client.currentRoom = room;
 
-        // Assign side
-        let existing = room.players.find((p) => p.id === myPlayerId);
+        let existing = room.players.find((p) => p.id === client.myPlayerId);
         if (!existing) {
           const side: 'BLUE' | 'RED' = room.players.some((p) => p.side === 'BLUE') ? 'RED' : 'BLUE';
-          existing = { ws, id: myPlayerId, name: playerName, side };
+          existing = { ws, id: client.myPlayerId, name: playerName, side };
           room.players.push(existing);
         } else {
           existing.ws = ws;
           existing.name = playerName;
         }
 
+        room.players.forEach((p) => {
+          (p.ws as any).currentRoom = room;
+          (p.ws as any).myPlayerId = p.id;
+        });
+
         const counts = countPieces(room.board);
         room.blueScore = counts.blue;
         room.redScore = counts.red;
 
         broadcastRoom(room);
-      } else if (data.type === 'MAKE_MOVE' && currentRoom) {
+      } else if (data.type === 'MAKE_MOVE' && client.currentRoom) {
+        const room = client.currentRoom;
         const { fromIdx, toIdx, playerId } = data;
-        const player = currentRoom.players.find((p) => p.id === playerId);
-        if (!player || player.side !== currentRoom.turn || currentRoom.winner) return;
+        const player = room.players.find((p: HexaPlayer) => p.id === playerId);
+        if (!player || player.side !== room.turn || room.winner) return;
 
-        // Validate move
         if (toIdx < 0 || toIdx >= 64 || fromIdx < 0 || fromIdx >= 64) return;
-        if (currentRoom.board[fromIdx] !== player.side) return;
-        if (currentRoom.board[toIdx] !== null) return;
+        if (room.board[fromIdx] !== player.side) return;
+        if (room.board[toIdx] !== null) return;
 
         const fromR = Math.floor(fromIdx / 8);
         const fromC = fromIdx % 8;
@@ -630,10 +786,10 @@ wss.on('connection', (ws) => {
         const dist = Math.max(Math.abs(fromR - toR), Math.abs(fromC - toC));
 
         if (dist === 1) {
-          currentRoom.board[toIdx] = player.side;
+          room.board[toIdx] = player.side;
         } else if (dist === 2) {
-          currentRoom.board[fromIdx] = null;
-          currentRoom.board[toIdx] = player.side;
+          room.board[fromIdx] = null;
+          room.board[toIdx] = player.side;
         } else {
           return;
         }
@@ -645,55 +801,58 @@ wss.on('connection', (ws) => {
             const nc = toC + dc;
             if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) {
               const neighborIdx = nr * 8 + nc;
-              if (currentRoom.board[neighborIdx] === enemySide) {
-                currentRoom.board[neighborIdx] = player.side;
+              if (room.board[neighborIdx] === enemySide) {
+                room.board[neighborIdx] = player.side;
               }
             }
           }
         }
 
-        const counts = countPieces(currentRoom.board);
-        currentRoom.blueScore = counts.blue;
-        currentRoom.redScore = counts.red;
+        const counts = countPieces(room.board);
+        room.blueScore = counts.blue;
+        room.redScore = counts.red;
 
-        const emptyCells = currentRoom.board.filter((c) => c === null).length;
-        if (emptyCells === 0 || counts.blue === 0 || counts.red === 0) {
-          if (counts.blue > counts.red) currentRoom.winner = 'BLUE';
-          else if (counts.red > counts.blue) currentRoom.winner = 'RED';
-          else currentRoom.winner = 'DRAW';
-        } else {
-          currentRoom.turn = enemySide;
+        const nextTurn: 'BLUE' | 'RED' = player.side === 'BLUE' ? 'RED' : 'BLUE';
+        room.turn = nextTurn;
+
+        const isFull = !room.board.includes(null);
+        if (isFull || counts.blue === 0 || counts.red === 0) {
+          if (counts.blue > counts.red) room.winner = 'BLUE';
+          else if (counts.red > counts.blue) room.winner = 'RED';
+          else room.winner = 'DRAW';
         }
 
-        broadcastRoom(currentRoom);
-      } else if (data.type === 'RESET_BOARD' && currentRoom) {
-        currentRoom.board = initBoard();
-        currentRoom.turn = 'BLUE';
-        currentRoom.winner = null;
-        currentRoom.blueScore = 2;
-        currentRoom.redScore = 2;
-        broadcastRoom(currentRoom);
-      } else if (data.type === 'HEXA_EMOJI' && currentRoom) {
-        const opponent = currentRoom.players.find((p) => p.id !== myPlayerId);
+        broadcastRoom(room);
+      } else if (data.type === 'RESET_GAME' && client.currentRoom) {
+        const room = client.currentRoom;
+        room.board = initBoard();
+        room.turn = 'BLUE';
+        room.winner = null;
+        room.blueScore = 2;
+        room.redScore = 2;
+        broadcastRoom(room);
+      } else if (data.type === 'HEXA_EMOJI' && client.currentRoom) {
+        const room = client.currentRoom;
+        const opponent = room.players.find((p: HexaPlayer) => p.id !== client.myPlayerId);
         if (opponent && opponent.ws.readyState === WebSocket.OPEN) {
           opponent.ws.send(
             JSON.stringify({
               type: 'HEXA_EMOJI_RELAY',
               emoji: data.emoji,
-              senderId: myPlayerId,
+              senderId: client.myPlayerId,
             })
           );
         }
       }
 
       // ==========================================
-      // SIBER TANKLAR (CYBER TANKS) WEBSOCKET HANDLERS
+      // 3. CYBER TANKS PROTOCOL
       // ==========================================
       else if (data.type === 'TANK_QUICK_MATCH') {
-        myPlayerId = data.playerId || Math.random().toString(36).substring(2, 9);
-        const playerName = data.name || 'Tankçı ' + myPlayerId.slice(0, 4);
+        client.myPlayerId = data.playerId || 'TK_' + Math.random().toString(36).substring(2, 8).toUpperCase();
+        const playerName = data.name || 'Tankçı ' + client.myPlayerId.slice(3, 7);
 
-        tankQueue = tankQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== myPlayerId);
+        tankQueue = tankQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== client.myPlayerId);
         if (tankQueue.length > 0) {
           const opponent = tankQueue.shift()!;
           const matchCode = 'TANK_' + Math.floor(1000 + Math.random() * 9000);
@@ -701,7 +860,7 @@ wss.on('connection', (ws) => {
             code: matchCode,
             players: [
               { ws: opponent.ws, id: opponent.id, name: opponent.name, slot: 'P1', ready: true, score: 0, lives: 3 },
-              { ws, id: myPlayerId, name: playerName, slot: 'P2', ready: true, score: 0, lives: 3 },
+              { ws, id: client.myPlayerId, name: playerName, slot: 'P2', ready: true, score: 0, lives: 3 },
             ],
             status: 'COUNTDOWN',
             round: 1,
@@ -710,19 +869,23 @@ wss.on('connection', (ws) => {
             mapSeed: Math.floor(Math.random() * 100000),
           };
           tankRooms.set(matchCode, room);
-          currentTankRoom = room;
-          broadcastTankRoom(room, { countdown: 3, matchFound: true });
+
+          (opponent.ws as any).currentTankRoom = room;
+          (opponent.ws as any).myPlayerId = opponent.id;
+          client.currentTankRoom = room;
+
+          startTankRoomCountdown(room);
         } else {
-          tankQueue.push({ ws, id: myPlayerId, name: playerName, timestamp: Date.now() });
+          tankQueue.push({ ws, id: client.myPlayerId, name: playerName, timestamp: Date.now() });
           ws.send(JSON.stringify({ type: 'TANK_QUEUE_WAITING', message: 'Tank düellosu için rakip aranıyor...' }));
         }
       } else if (data.type === 'TANK_JOIN_ROOM') {
-        const roomCode = (data.code || 'TANK1').toUpperCase().trim().slice(0, 8);
-        myPlayerId = data.playerId || Math.random().toString(36).substring(2, 9);
-        const playerName = data.name || 'Tankçı ' + myPlayerId.slice(0, 4);
+        const roomCode = (data.code || 'TANK1').toUpperCase().trim().slice(0, 10);
+        client.myPlayerId = data.playerId || 'TK_' + Math.random().toString(36).substring(2, 8).toUpperCase();
+        const playerName = data.name || 'Tankçı ' + client.myPlayerId.slice(3, 7);
 
         if (roomCode === 'QUICK') {
-          tankQueue = tankQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== myPlayerId);
+          tankQueue = tankQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== client.myPlayerId);
           if (tankQueue.length > 0) {
             const opponent = tankQueue.shift()!;
             const matchCode = 'TANK_' + Math.floor(1000 + Math.random() * 9000);
@@ -730,7 +893,7 @@ wss.on('connection', (ws) => {
               code: matchCode,
               players: [
                 { ws: opponent.ws, id: opponent.id, name: opponent.name, slot: 'P1', ready: true, score: 0, lives: 3 },
-                { ws, id: myPlayerId, name: playerName, slot: 'P2', ready: true, score: 0, lives: 3 },
+                { ws, id: client.myPlayerId, name: playerName, slot: 'P2', ready: true, score: 0, lives: 3 },
               ],
               status: 'COUNTDOWN',
               round: 1,
@@ -739,11 +902,15 @@ wss.on('connection', (ws) => {
               mapSeed: Math.floor(Math.random() * 100000),
             };
             tankRooms.set(matchCode, room);
-            currentTankRoom = room;
-            broadcastTankRoom(room, { countdown: 3, matchFound: true });
+
+            (opponent.ws as any).currentTankRoom = room;
+            (opponent.ws as any).myPlayerId = opponent.id;
+            client.currentTankRoom = room;
+
+            startTankRoomCountdown(room);
             return;
           } else {
-            tankQueue.push({ ws, id: myPlayerId, name: playerName, timestamp: Date.now() });
+            tankQueue.push({ ws, id: client.myPlayerId, name: playerName, timestamp: Date.now() });
             ws.send(JSON.stringify({ type: 'TANK_QUEUE_WAITING', message: 'Tank düellosu için rakip aranıyor...' }));
             return;
           }
@@ -763,18 +930,18 @@ wss.on('connection', (ws) => {
           tankRooms.set(roomCode, room);
         }
 
-        currentTankRoom = room;
+        client.currentTankRoom = room;
 
-        let existing = room.players.find((p) => p.id === myPlayerId);
+        let existing = room.players.find((p) => p.id === client.myPlayerId);
         if (!existing) {
           if (room.players.length >= 2) {
-            ws.send(JSON.stringify({ type: 'TANK_ERROR', message: 'Tank odası dolu! (Maksimum 2 oyuncu)' }));
+            ws.send(JSON.stringify({ type: 'TANK_ERROR', message: 'Oda dolu! (Maksimum 2 tank)' }));
             return;
           }
           const slot: 'P1' | 'P2' = room.players.some((p) => p.slot === 'P1') ? 'P2' : 'P1';
           existing = {
             ws,
-            id: myPlayerId,
+            id: client.myPlayerId,
             name: playerName,
             slot,
             ready: false,
@@ -787,31 +954,32 @@ wss.on('connection', (ws) => {
           existing.name = playerName;
         }
 
+        room.players.forEach((p) => {
+          (p.ws as any).currentTankRoom = room;
+          (p.ws as any).myPlayerId = p.id;
+        });
+
         broadcastTankRoom(room);
-      } else if (data.type === 'TANK_TOGGLE_READY' && currentTankRoom) {
-        const p = currentTankRoom.players.find((pl) => pl.id === myPlayerId);
-        if (p) {
-          p.ready = !p.ready;
-          // If both players are ready (or 1 ready in solo bot mode), start countdown
-          if (currentTankRoom.players.length === 2 && currentTankRoom.players.every((pl) => pl.ready)) {
-            currentTankRoom.status = 'COUNTDOWN';
-            currentTankRoom.winner = null;
-            currentTankRoom.roundWinner = null;
-            currentTankRoom.mapSeed = Math.floor(Math.random() * 100000);
-            currentTankRoom.players.forEach((pl) => {
-              pl.lives = 3;
-            });
-            broadcastTankRoom(currentTankRoom, { countdown: 3 });
-          } else {
-            broadcastTankRoom(currentTankRoom);
+
+        if (room.players.length === 2 && room.players.every((p) => p.ready)) {
+          startTankRoomCountdown(room);
+        }
+      } else if (data.type === 'TANK_TOGGLE_READY' && client.currentTankRoom) {
+        const room = client.currentTankRoom;
+        const player = room.players.find((p: TankPlayer) => p.id === client.myPlayerId);
+        if (player) {
+          player.ready = !player.ready;
+          broadcastTankRoom(room);
+          if (room.players.length === 2 && room.players.every((p: TankPlayer) => p.ready)) {
+            startTankRoomCountdown(room);
           }
         }
-      } else if (data.type === 'TANK_START_BATTLE' && currentTankRoom) {
-        currentTankRoom.status = 'BATTLE';
-        broadcastTankRoom(currentTankRoom);
-      } else if (data.type === 'TANK_SYNC_POS' && currentTankRoom) {
-        // High frequency position & turret relay to opponent
-        const opponent = currentTankRoom.players.find((p) => p.id !== myPlayerId);
+      } else if (data.type === 'TANK_START_BATTLE' && client.currentTankRoom) {
+        client.currentTankRoom.status = 'BATTLE';
+        broadcastTankRoom(client.currentTankRoom);
+      } else if (data.type === 'TANK_SYNC_POS' && client.currentTankRoom) {
+        const room = client.currentTankRoom;
+        const opponent = room.players.find((p: TankPlayer) => p.id !== client.myPlayerId);
         if (opponent && opponent.ws.readyState === WebSocket.OPEN) {
           opponent.ws.send(
             JSON.stringify({
@@ -827,9 +995,9 @@ wss.on('connection', (ws) => {
             })
           );
         }
-      } else if (data.type === 'TANK_FIRE_BULLET' && currentTankRoom) {
-        // Relay projectile to opponent
-        const opponent = currentTankRoom.players.find((p) => p.id !== myPlayerId);
+      } else if (data.type === 'TANK_FIRE_BULLET' && client.currentTankRoom) {
+        const room = client.currentTankRoom;
+        const opponent = room.players.find((p: TankPlayer) => p.id !== client.myPlayerId);
         if (opponent && opponent.ws.readyState === WebSocket.OPEN) {
           opponent.ws.send(
             JSON.stringify({
@@ -844,97 +1012,105 @@ wss.on('connection', (ws) => {
             })
           );
         }
-      } else if (data.type === 'TANK_HIT' && currentTankRoom) {
-        const victim = currentTankRoom.players.find((p) => p.id === myPlayerId);
-        if (victim && currentTankRoom.status === 'BATTLE') {
+      } else if (data.type === 'TANK_HIT' && client.currentTankRoom) {
+        const room = client.currentTankRoom;
+        const victim = room.players.find((p: TankPlayer) => p.id === client.myPlayerId);
+        if (victim && room.status === 'BATTLE') {
           victim.lives = Math.max(0, data.lives);
           if (victim.lives <= 0) {
-            const winnerPlayer = currentTankRoom.players.find((p) => p.id !== myPlayerId);
+            const winnerPlayer = room.players.find((p: TankPlayer) => p.id !== client.myPlayerId);
             if (winnerPlayer) {
               winnerPlayer.score += 1;
-              currentTankRoom.roundWinner = winnerPlayer.slot;
+              room.roundWinner = winnerPlayer.slot;
               if (winnerPlayer.score >= 3) {
-                currentTankRoom.status = 'MATCH_OVER';
-                currentTankRoom.winner = winnerPlayer.slot;
+                room.status = 'MATCH_OVER';
+                room.winner = winnerPlayer.slot;
               } else {
-                currentTankRoom.status = 'ROUND_OVER';
+                room.status = 'ROUND_OVER';
               }
             }
-            broadcastTankRoom(currentTankRoom);
-          } else {
-            broadcastTankRoom(currentTankRoom);
           }
+          broadcastTankRoom(room);
         }
-      } else if (data.type === 'TANK_NEXT_ROUND' && currentTankRoom) {
-        currentTankRoom.round += 1;
-        currentTankRoom.status = 'COUNTDOWN';
-        currentTankRoom.roundWinner = null;
-        currentTankRoom.mapSeed = Math.floor(Math.random() * 100000);
-        currentTankRoom.players.forEach((p) => {
+      } else if (data.type === 'TANK_NEXT_ROUND' && client.currentTankRoom) {
+        const room = client.currentTankRoom;
+        room.round += 1;
+        room.roundWinner = null;
+        room.mapSeed = Math.floor(Math.random() * 100000);
+        room.players.forEach((p: TankPlayer) => {
           p.lives = 3;
           p.ready = true;
         });
-        broadcastTankRoom(currentTankRoom, { countdown: 3 });
-      } else if (data.type === 'TANK_REMATCH' && currentTankRoom) {
-        currentTankRoom.round = 1;
-        currentTankRoom.status = 'COUNTDOWN';
-        currentTankRoom.winner = null;
-        currentTankRoom.roundWinner = null;
-        currentTankRoom.mapSeed = Math.floor(Math.random() * 100000);
-        currentTankRoom.players.forEach((p) => {
+        startTankRoomCountdown(room);
+      } else if (data.type === 'TANK_REMATCH' && client.currentTankRoom) {
+        const room = client.currentTankRoom;
+        room.round = 1;
+        room.winner = null;
+        room.roundWinner = null;
+        room.mapSeed = Math.floor(Math.random() * 100000);
+        room.players.forEach((p: TankPlayer) => {
           p.score = 0;
           p.lives = 3;
           p.ready = true;
         });
-        broadcastTankRoom(currentTankRoom, { countdown: 3 });
-      } else if (data.type === 'TANK_EMOJI' && currentTankRoom) {
-        const opponent = currentTankRoom.players.find((p) => p.id !== myPlayerId);
+        startTankRoomCountdown(room);
+      } else if (data.type === 'TANK_EMOJI' && client.currentTankRoom) {
+        const room = client.currentTankRoom;
+        const opponent = room.players.find((p: TankPlayer) => p.id !== client.myPlayerId);
         if (opponent && opponent.ws.readyState === WebSocket.OPEN) {
           opponent.ws.send(
             JSON.stringify({
               type: 'TANK_EMOJI_RELAY',
               emoji: data.emoji,
-              senderId: myPlayerId,
+              senderId: client.myPlayerId,
             })
           );
         }
       }
     } catch {
-      // ignore
+      // ignore JSON parse error
     }
   });
 
   ws.on('close', () => {
-    gdQueue = gdQueue.filter((qp) => qp.id !== myPlayerId);
-    tankQueue = tankQueue.filter((qp) => qp.id !== myPlayerId);
-    hexaQueue = hexaQueue.filter((qp) => qp.id !== myPlayerId);
+    const id = client.myPlayerId;
+    gdQueue = gdQueue.filter((qp) => qp.id !== id);
+    tankQueue = tankQueue.filter((qp) => qp.id !== id);
+    hexaQueue = hexaQueue.filter((qp) => qp.id !== id);
 
-    if (currentRoom) {
-      currentRoom.players = currentRoom.players.filter((p) => p.id !== myPlayerId);
-      if (currentRoom.players.length === 0) {
-        rooms.delete(currentRoom.code);
+    if (client.currentRoom) {
+      const room = client.currentRoom;
+      room.players = room.players.filter((p: HexaPlayer) => p.id !== id);
+      if (room.players.length === 0) {
+        rooms.delete(room.code);
       } else {
-        broadcastRoom(currentRoom);
+        broadcastRoom(room);
       }
     }
-    if (currentGDRoom) {
-      currentGDRoom.players = currentGDRoom.players.filter((p) => p.id !== myPlayerId);
-      if (currentGDRoom.players.length === 0) {
-        gdRooms.delete(currentGDRoom.code);
+
+    if (client.currentGDRoom) {
+      const room = client.currentGDRoom;
+      room.players = room.players.filter((p: GDPerson) => p.id !== id);
+      if (room.players.length === 0) {
+        if (room.countdownTimer) clearInterval(room.countdownTimer);
+        gdRooms.delete(room.code);
       } else {
-        currentGDRoom.status = 'LOBBY';
-        currentGDRoom.winner = null;
-        broadcastGDRoom(currentGDRoom);
+        room.status = 'LOBBY';
+        room.winner = null;
+        broadcastGDRoom(room);
       }
     }
-    if (currentTankRoom) {
-      currentTankRoom.players = currentTankRoom.players.filter((p) => p.id !== myPlayerId);
-      if (currentTankRoom.players.length === 0) {
-        tankRooms.delete(currentTankRoom.code);
+
+    if (client.currentTankRoom) {
+      const room = client.currentTankRoom;
+      room.players = room.players.filter((p: TankPlayer) => p.id !== id);
+      if (room.players.length === 0) {
+        if (room.countdownTimer) clearInterval(room.countdownTimer);
+        tankRooms.delete(room.code);
       } else {
-        currentTankRoom.status = 'LOBBY';
-        currentTankRoom.winner = null;
-        broadcastTankRoom(currentTankRoom);
+        room.status = 'LOBBY';
+        room.winner = null;
+        broadcastTankRoom(room);
       }
     }
   });
