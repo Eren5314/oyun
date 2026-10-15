@@ -3,13 +3,129 @@ import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.use(express.json());
+
+// ==========================================
+// USER ACCOUNTS & AUTH PERSISTENCE
+// ==========================================
+interface UserAccount {
+  username: string;
+  password: string;
+  avatar: string;
+  createdAt: string;
+  records: {
+    'geometry-dash': number;
+    'hexa-conquest': number;
+    'cyber-tanks': number;
+  };
+}
+
+const USERS_FILE = path.resolve(__dirname, 'users_db.json');
+let usersDb: Record<string, UserAccount> = {};
+
+try {
+  if (fs.existsSync(USERS_FILE)) {
+    usersDb = JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
+  }
+} catch {
+  usersDb = {};
+}
+
+function saveUsers() {
+  try {
+    fs.writeFileSync(USERS_FILE, JSON.stringify(usersDb, null, 2), 'utf-8');
+  } catch {}
+}
+
+app.post('/api/auth/register', (req, res) => {
+  const { username, password, avatar } = req.body || {};
+  if (!username || typeof username !== 'string' || username.trim().length < 3) {
+    return res.status(400).json({ error: 'Kullanıcı adı en az 3 karakter olmalıdır.' });
+  }
+  if (!password || typeof password !== 'string' || password.length < 4) {
+    return res.status(400).json({ error: 'Parola en az 4 karakter olmalıdır.' });
+  }
+  const cleanUsername = username.trim();
+  const lowerKey = cleanUsername.toLowerCase();
+  if (usersDb[lowerKey]) {
+    return res.status(409).json({ error: 'Bu kullanıcı adı zaten alınmış! Lütfen başka bir ad seçin.' });
+  }
+  const newUser: UserAccount = {
+    username: cleanUsername,
+    password,
+    avatar: avatar || '🎮',
+    createdAt: new Date().toISOString(),
+    records: {
+      'geometry-dash': 0,
+      'hexa-conquest': 0,
+      'cyber-tanks': 0,
+    },
+  };
+  usersDb[lowerKey] = newUser;
+  saveUsers();
+  return res.json({
+    success: true,
+    user: {
+      username: newUser.username,
+      avatar: newUser.avatar,
+      records: newUser.records,
+    },
+  });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Kullanıcı adı ve parola zorunludur.' });
+  }
+  const lowerKey = String(username).trim().toLowerCase();
+  const existing = usersDb[lowerKey];
+  if (!existing || existing.password !== password) {
+    return res.status(401).json({ error: 'Kullanıcı adı veya parola hatalı!' });
+  }
+  return res.json({
+    success: true,
+    user: {
+      username: existing.username,
+      avatar: existing.avatar,
+      records: existing.records,
+    },
+  });
+});
+
+app.post('/api/auth/update-score', (req, res) => {
+  const { username, gameId, score } = req.body || {};
+  if (!username || !gameId) return res.status(400).json({ error: 'Eksik parametre' });
+  const lowerKey = String(username).trim().toLowerCase();
+  const user = usersDb[lowerKey];
+  if (user) {
+    const cur = user.records[gameId as keyof typeof user.records] || 0;
+    user.records[gameId as keyof typeof user.records] = Math.max(cur, Number(score) || 0);
+    saveUsers();
+    return res.json({ success: true, records: user.records });
+  }
+  return res.status(404).json({ error: 'Kullanıcı bulunamadı' });
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
+
+// Keep-alive heartbeat every 20 seconds to prevent Cloud Run idle drop
+const heartbeatInterval = setInterval(() => {
+  wss.clients.forEach((client) => {
+    if ((client as any).isAlive === false) {
+      return client.terminate();
+    }
+    (client as any).isAlive = false;
+    client.ping();
+  });
+}, 20000);
 
 interface Player {
   ws: WebSocket;
@@ -167,7 +283,27 @@ function broadcastTankRoom(room: TankRoom, extraData?: any) {
   });
 }
 
+// ==========================================
+// REAL-TIME MATCHMAKING QUEUES
+// ==========================================
+interface QueuePlayer {
+  ws: WebSocket;
+  id: string;
+  name: string;
+  cosmetics?: any;
+  timestamp: number;
+}
+
+let gdQueue: QueuePlayer[] = [];
+let tankQueue: QueuePlayer[] = [];
+let hexaQueue: QueuePlayer[] = [];
+
 wss.on('connection', (ws) => {
+  (ws as any).isAlive = true;
+  ws.on('pong', () => {
+    (ws as any).isAlive = true;
+  });
+
   let currentRoom: Room | null = null;
   let currentGDRoom: GDRoom | null = null;
   let currentTankRoom: TankRoom | null = null;
@@ -180,10 +316,110 @@ wss.on('connection', (ws) => {
       // ==========================================
       // GEOMETRY DASH ONLINE WEBSOCKET PROTOCOL
       // ==========================================
-      if (data.type === 'GD_JOIN_ROOM') {
+      if (data.type === 'GD_QUICK_MATCH') {
+        myPlayerId = data.playerId || Math.random().toString(36).substring(2, 9);
+        const playerName = data.name || 'Koşucu ' + myPlayerId.slice(0, 4);
+
+        // Filter closed sockets from queue
+        gdQueue = gdQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== myPlayerId);
+
+        if (gdQueue.length > 0) {
+          // Instant Match Found!
+          const opponent = gdQueue.shift()!;
+          const matchCode = 'DUEL_' + Math.floor(1000 + Math.random() * 9000);
+          const room: GDRoom = {
+            code: matchCode,
+            players: [
+              {
+                ws: opponent.ws,
+                id: opponent.id,
+                name: opponent.name,
+                slot: 'P1',
+                cosmetics: opponent.cosmetics || {},
+                ready: true,
+                lives: 5,
+              },
+              {
+                ws: ws,
+                id: myPlayerId,
+                name: playerName,
+                slot: 'P2',
+                cosmetics: data.cosmetics || {},
+                ready: true,
+                lives: 5,
+              },
+            ],
+            status: 'COUNTDOWN',
+            winner: null,
+            seed: Math.floor(Math.random() * 100000),
+          };
+          gdRooms.set(matchCode, room);
+          currentGDRoom = room;
+          broadcastGDRoom(room, {
+            countdown: 3,
+            matchFound: true,
+          });
+        } else {
+          // Add to queue and wait
+          gdQueue.push({
+            ws,
+            id: myPlayerId,
+            name: playerName,
+            cosmetics: data.cosmetics || {},
+            timestamp: Date.now(),
+          });
+          ws.send(JSON.stringify({ type: 'GD_QUEUE_WAITING', message: 'Çevrim içi rakip aranıyor...' }));
+        }
+      } else if (data.type === 'GD_LEAVE_QUEUE') {
+        gdQueue = gdQueue.filter((qp) => qp.id !== myPlayerId);
+      } else if (data.type === 'GD_JOIN_ROOM') {
         const roomCode = (data.code || 'GD1').toUpperCase().trim().slice(0, 8);
         myPlayerId = data.playerId || Math.random().toString(36).substring(2, 9);
         const playerName = data.name || 'Koşucu ' + myPlayerId.slice(0, 4);
+
+        // If code is QUICK, route to quick match
+        if (roomCode === 'QUICK') {
+          // Trigger quick match directly
+          gdQueue = gdQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== myPlayerId);
+          if (gdQueue.length > 0) {
+            const opponent = gdQueue.shift()!;
+            const matchCode = 'DUEL_' + Math.floor(1000 + Math.random() * 9000);
+            const room: GDRoom = {
+              code: matchCode,
+              players: [
+                {
+                  ws: opponent.ws,
+                  id: opponent.id,
+                  name: opponent.name,
+                  slot: 'P1',
+                  cosmetics: opponent.cosmetics || {},
+                  ready: true,
+                  lives: 5,
+                },
+                {
+                  ws: ws,
+                  id: myPlayerId,
+                  name: playerName,
+                  slot: 'P2',
+                  cosmetics: data.cosmetics || {},
+                  ready: true,
+                  lives: 5,
+                },
+              ],
+              status: 'COUNTDOWN',
+              winner: null,
+              seed: Math.floor(Math.random() * 100000),
+            };
+            gdRooms.set(matchCode, room);
+            currentGDRoom = room;
+            broadcastGDRoom(room, { countdown: 3, matchFound: true });
+            return;
+          } else {
+            gdQueue.push({ ws, id: myPlayerId, name: playerName, cosmetics: data.cosmetics || {}, timestamp: Date.now() });
+            ws.send(JSON.stringify({ type: 'GD_QUEUE_WAITING', message: 'Çevrim içi rakip aranıyor...' }));
+            return;
+          }
+        }
 
         let room = gdRooms.get(roomCode);
         if (!room) {
@@ -285,10 +521,65 @@ wss.on('connection', (ws) => {
       // ==========================================
       // HEXA CONQUEST PROTOCOL
       // ==========================================
-      else if (data.type === 'JOIN_ROOM') {
+      else if (data.type === 'HEXA_QUICK_MATCH') {
+        myPlayerId = data.playerId || Math.random().toString(36).substring(2, 9);
+        const playerName = data.name || 'Komutan ' + myPlayerId.slice(0, 4);
+
+        hexaQueue = hexaQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== myPlayerId);
+        if (hexaQueue.length > 0) {
+          const opponent = hexaQueue.shift()!;
+          const matchCode = 'ARENA_' + Math.floor(1000 + Math.random() * 9000);
+          const room: Room = {
+            code: matchCode,
+            players: [
+              { ws: opponent.ws, id: opponent.id, name: opponent.name, side: 'BLUE' },
+              { ws, id: myPlayerId, name: playerName, side: 'RED' },
+            ],
+            board: initBoard(),
+            turn: 'BLUE',
+            winner: null,
+            blueScore: 2,
+            redScore: 2,
+          };
+          rooms.set(matchCode, room);
+          currentRoom = room;
+          broadcastRoom(room);
+        } else {
+          hexaQueue.push({ ws, id: myPlayerId, name: playerName, timestamp: Date.now() });
+          ws.send(JSON.stringify({ type: 'HEXA_QUEUE_WAITING', message: 'Strateji rakibi aranıyor...' }));
+        }
+      } else if (data.type === 'JOIN_ROOM') {
         const roomCode = (data.code || 'GLOBAL').toUpperCase().trim().slice(0, 8);
         myPlayerId = data.playerId || Math.random().toString(36).substring(2, 9);
         const playerName = data.name || 'Komutan ' + myPlayerId.slice(0, 4);
+
+        if (roomCode === 'QUICK') {
+          hexaQueue = hexaQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== myPlayerId);
+          if (hexaQueue.length > 0) {
+            const opponent = hexaQueue.shift()!;
+            const matchCode = 'ARENA_' + Math.floor(1000 + Math.random() * 9000);
+            const room: Room = {
+              code: matchCode,
+              players: [
+                { ws: opponent.ws, id: opponent.id, name: opponent.name, side: 'BLUE' },
+                { ws, id: myPlayerId, name: playerName, side: 'RED' },
+              ],
+              board: initBoard(),
+              turn: 'BLUE',
+              winner: null,
+              blueScore: 2,
+              redScore: 2,
+            };
+            rooms.set(matchCode, room);
+            currentRoom = room;
+            broadcastRoom(room);
+            return;
+          } else {
+            hexaQueue.push({ ws, id: myPlayerId, name: playerName, timestamp: Date.now() });
+            ws.send(JSON.stringify({ type: 'HEXA_QUEUE_WAITING', message: 'Strateji rakibi aranıyor...' }));
+            return;
+          }
+        }
 
         let room = rooms.get(roomCode);
         if (!room) {
@@ -383,7 +674,6 @@ wss.on('connection', (ws) => {
         currentRoom.redScore = 2;
         broadcastRoom(currentRoom);
       } else if (data.type === 'HEXA_EMOJI' && currentRoom) {
-        // Relay reaction emoji to room opponents
         const opponent = currentRoom.players.find((p) => p.id !== myPlayerId);
         if (opponent && opponent.ws.readyState === WebSocket.OPEN) {
           opponent.ws.send(
@@ -399,10 +689,65 @@ wss.on('connection', (ws) => {
       // ==========================================
       // SIBER TANKLAR (CYBER TANKS) WEBSOCKET HANDLERS
       // ==========================================
-      else if (data.type === 'TANK_JOIN_ROOM') {
+      else if (data.type === 'TANK_QUICK_MATCH') {
+        myPlayerId = data.playerId || Math.random().toString(36).substring(2, 9);
+        const playerName = data.name || 'Tankçı ' + myPlayerId.slice(0, 4);
+
+        tankQueue = tankQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== myPlayerId);
+        if (tankQueue.length > 0) {
+          const opponent = tankQueue.shift()!;
+          const matchCode = 'TANK_' + Math.floor(1000 + Math.random() * 9000);
+          const room: TankRoom = {
+            code: matchCode,
+            players: [
+              { ws: opponent.ws, id: opponent.id, name: opponent.name, slot: 'P1', ready: true, score: 0, lives: 3 },
+              { ws, id: myPlayerId, name: playerName, slot: 'P2', ready: true, score: 0, lives: 3 },
+            ],
+            status: 'COUNTDOWN',
+            round: 1,
+            winner: null,
+            roundWinner: null,
+            mapSeed: Math.floor(Math.random() * 100000),
+          };
+          tankRooms.set(matchCode, room);
+          currentTankRoom = room;
+          broadcastTankRoom(room, { countdown: 3, matchFound: true });
+        } else {
+          tankQueue.push({ ws, id: myPlayerId, name: playerName, timestamp: Date.now() });
+          ws.send(JSON.stringify({ type: 'TANK_QUEUE_WAITING', message: 'Tank düellosu için rakip aranıyor...' }));
+        }
+      } else if (data.type === 'TANK_JOIN_ROOM') {
         const roomCode = (data.code || 'TANK1').toUpperCase().trim().slice(0, 8);
         myPlayerId = data.playerId || Math.random().toString(36).substring(2, 9);
         const playerName = data.name || 'Tankçı ' + myPlayerId.slice(0, 4);
+
+        if (roomCode === 'QUICK') {
+          tankQueue = tankQueue.filter((qp) => qp.ws.readyState === WebSocket.OPEN && qp.id !== myPlayerId);
+          if (tankQueue.length > 0) {
+            const opponent = tankQueue.shift()!;
+            const matchCode = 'TANK_' + Math.floor(1000 + Math.random() * 9000);
+            const room: TankRoom = {
+              code: matchCode,
+              players: [
+                { ws: opponent.ws, id: opponent.id, name: opponent.name, slot: 'P1', ready: true, score: 0, lives: 3 },
+                { ws, id: myPlayerId, name: playerName, slot: 'P2', ready: true, score: 0, lives: 3 },
+              ],
+              status: 'COUNTDOWN',
+              round: 1,
+              winner: null,
+              roundWinner: null,
+              mapSeed: Math.floor(Math.random() * 100000),
+            };
+            tankRooms.set(matchCode, room);
+            currentTankRoom = room;
+            broadcastTankRoom(room, { countdown: 3, matchFound: true });
+            return;
+          } else {
+            tankQueue.push({ ws, id: myPlayerId, name: playerName, timestamp: Date.now() });
+            ws.send(JSON.stringify({ type: 'TANK_QUEUE_WAITING', message: 'Tank düellosu için rakip aranıyor...' }));
+            return;
+          }
+        }
 
         let room = tankRooms.get(roomCode);
         if (!room) {
@@ -560,6 +905,10 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    gdQueue = gdQueue.filter((qp) => qp.id !== myPlayerId);
+    tankQueue = tankQueue.filter((qp) => qp.id !== myPlayerId);
+    hexaQueue = hexaQueue.filter((qp) => qp.id !== myPlayerId);
+
     if (currentRoom) {
       currentRoom.players = currentRoom.players.filter((p) => p.id !== myPlayerId);
       if (currentRoom.players.length === 0) {

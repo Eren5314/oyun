@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Volume2, VolumeX, Gamepad2, Swords, Crosshair, Sparkles, Trophy, Maximize2, Minimize2, ExternalLink } from 'lucide-react';
+import { Volume2, VolumeX, Gamepad2, Swords, Crosshair, Sparkles, Trophy, Maximize2, Minimize2, ExternalLink, User, LogIn, LogOut } from 'lucide-react';
 import { GeometryDashGame } from './components/GeometryDashGame';
 import { HexaConquestOnlineGame } from './components/HexaConquestOnlineGame';
 import { CyberTanksOnlineGame } from './components/CyberTanksOnlineGame';
+import { AuthModal, UserAccountData } from './components/AuthModal';
 import { sound } from './utils/sound';
 import alperenAdImg from './assets/images/alperen_oyun_ad_1792046781254.jpg';
 
@@ -47,6 +48,20 @@ const GAMES: GameInfo[] = [
 export default function App() {
   const [activeGame, setActiveGame] = useState<GameId>('geometry-dash');
   const [isMuted, setIsMuted] = useState<boolean>(false);
+
+  // User Authentication State (Pops up automatically on entrance if not logged in)
+  const [currentUser, setCurrentUser] = useState<UserAccountData | null>(() => {
+    try {
+      const saved = localStorage.getItem('gamehub_auth_user');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(() => {
+    return !localStorage.getItem('gamehub_auth_user');
+  });
+
   const [records, setRecords] = useState<Record<GameId, number>>(() => {
     try {
       const gd = JSON.parse(localStorage.getItem('gd_best_pro_v10') || '{}');
@@ -76,6 +91,19 @@ export default function App() {
       ...prev,
       [id as GameId]: Math.max(prev[id as GameId] || 0, s),
     }));
+
+    // Sync score with backend if user is logged in
+    if (currentUser?.username) {
+      fetch('/api/auth/update-score', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: currentUser.username,
+          gameId: id,
+          score: s,
+        }),
+      }).catch(() => {});
+    }
   };
 
   const toggleSound = () => {
@@ -130,6 +158,37 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-3">
+          {/* User Account Pill / Login Button */}
+          {currentUser ? (
+            <div className="flex items-center gap-2 bg-slate-800/90 border border-blue-500/30 px-3 py-1.5 rounded-lg shadow-sm">
+              <span className="text-base">{currentUser.avatar || '🎮'}</span>
+              <span className="text-xs font-bold text-white max-w-[110px] truncate">{currentUser.username}</span>
+              <button
+                onClick={() => {
+                  localStorage.removeItem('gamehub_auth_user');
+                  setCurrentUser(null);
+                  setIsAuthModalOpen(true);
+                  sound.playPop();
+                }}
+                className="text-[10px] font-semibold text-slate-400 hover:text-rose-400 ml-1 cursor-pointer transition-colors"
+                title="Çıkış Yap"
+              >
+                Çıkış
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => {
+                setIsAuthModalOpen(true);
+                sound.playPop();
+              }}
+              className="px-3.5 py-2 text-xs font-bold text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 rounded-lg shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <LogIn className="w-3.5 h-3.5" />
+              <span>Giriş Yap / Kaydol</span>
+            </button>
+          )}
+
           <button
             onClick={toggleFullscreen}
             className="px-3.5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-500 rounded-lg shadow-md transition-colors flex items-center gap-1.5 cursor-pointer"
@@ -272,9 +331,15 @@ export default function App() {
 
           {/* Active Game Component */}
           <div className="flex-1">
-            {activeGame === 'geometry-dash' && <GeometryDashGame onScoreUpdate={handleScoreUpdate} />}
-            {activeGame === 'hexa-conquest' && <HexaConquestOnlineGame onScoreUpdate={handleScoreUpdate} />}
-            {activeGame === 'cyber-tanks' && <CyberTanksOnlineGame onScoreUpdate={handleScoreUpdate} />}
+            {activeGame === 'geometry-dash' && (
+              <GeometryDashGame onScoreUpdate={handleScoreUpdate} playerName={currentUser?.username} />
+            )}
+            {activeGame === 'hexa-conquest' && (
+              <HexaConquestOnlineGame onScoreUpdate={handleScoreUpdate} playerName={currentUser?.username} />
+            )}
+            {activeGame === 'cyber-tanks' && (
+              <CyberTanksOnlineGame onScoreUpdate={handleScoreUpdate} playerName={currentUser?.username} />
+            )}
           </div>
         </main>
 
@@ -345,6 +410,21 @@ export default function App() {
           </aside>
         )}
       </div>
+
+      {/* Auth Modal (Giriş Yap & Kaydol) */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onLoginSuccess={(user) => {
+          setCurrentUser(user);
+          if (user.records) {
+            setRecords((prev) => ({
+              ...prev,
+              ...user.records,
+            }));
+          }
+        }}
+      />
     </div>
   );
 }

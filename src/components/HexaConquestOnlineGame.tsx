@@ -35,7 +35,8 @@ interface RoomData {
 
 export const HexaConquestOnlineGame: React.FC<{
   onScoreUpdate: (id: string, s: number) => void;
-}> = ({ onScoreUpdate }) => {
+  playerName?: string;
+}> = ({ onScoreUpdate, playerName }) => {
   const [roomCodeInput, setRoomCodeInput] = useState('ARENA1');
   const [currentRoomCode, setCurrentRoomCode] = useState('ARENA1');
   const [isConnected, setIsConnected] = useState(false);
@@ -48,6 +49,7 @@ export const HexaConquestOnlineGame: React.FC<{
   const [floatingEmoji, setFloatingEmoji] = useState<{ emoji: string; id: number } | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
+  const myDisplayName = playerName || 'Komutan ' + myPlayerId.slice(2, 6);
 
   const connectWs = useCallback(
     (code: string) => {
@@ -56,7 +58,7 @@ export const HexaConquestOnlineGame: React.FC<{
       }
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}`;
+      const wsUrl = `${protocol}//${window.location.host}/ws`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
@@ -67,7 +69,7 @@ export const HexaConquestOnlineGame: React.FC<{
             type: 'JOIN_ROOM',
             code: code,
             playerId: myPlayerId,
-            name: 'Komutan ' + myPlayerId.slice(2, 6),
+            name: myDisplayName,
           })
         );
       };
@@ -91,6 +93,11 @@ export const HexaConquestOnlineGame: React.FC<{
 
       ws.onclose = () => {
         setIsConnected(false);
+        setTimeout(() => {
+          if (wsRef.current === ws) {
+            connectWs(code);
+          }
+        }, 1500);
       };
 
       ws.onerror = () => {

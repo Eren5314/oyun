@@ -85,7 +85,8 @@ const TANK_RADIUS = 18;
 
 export const CyberTanksOnlineGame: React.FC<{
   onScoreUpdate: (id: string, s: number) => void;
-}> = ({ onScoreUpdate }) => {
+  playerName?: string;
+}> = ({ onScoreUpdate, playerName }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Networking state
@@ -97,6 +98,8 @@ export const CyberTanksOnlineGame: React.FC<{
   const [myPlayerId] = useState(() => 'TK_' + Math.random().toString(36).substring(2, 8).toUpperCase());
   const [isBotEnabled, setIsBotEnabled] = useState(false);
   const [floatingEmoji, setFloatingEmoji] = useState<{ emoji: string; id: number } | null>(null);
+
+  const myTankName = playerName || 'Tankçı ' + myPlayerId.slice(3, 7);
 
   // Local game state for rendering and animation loop
   const gameStateRef = useRef({
@@ -203,7 +206,7 @@ export const CyberTanksOnlineGame: React.FC<{
       }
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}`;
+      const wsUrl = `${protocol}//${window.location.host}/ws`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
@@ -214,7 +217,7 @@ export const CyberTanksOnlineGame: React.FC<{
             type: 'TANK_JOIN_ROOM',
             code,
             playerId: myPlayerId,
-            name: 'Tankçı ' + myPlayerId.slice(3, 7),
+            name: myTankName,
           })
         );
       };
@@ -280,7 +283,14 @@ export const CyberTanksOnlineGame: React.FC<{
         } catch {}
       };
 
-      ws.onclose = () => setIsConnected(false);
+      ws.onclose = () => {
+        setIsConnected(false);
+        setTimeout(() => {
+          if (wsRef.current === ws) {
+            connectWs(code);
+          }
+        }, 1500);
+      };
       ws.onerror = () => setIsConnected(false);
     },
     [myPlayerId, mySlot, onScoreUpdate]

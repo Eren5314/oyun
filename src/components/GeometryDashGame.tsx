@@ -95,7 +95,10 @@ interface PlayerRuntime {
   trail: Array<{ x: number; y: number; rot: number; color: string; tick: number }>;
 }
 
-export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number) => void }> = ({ onScoreUpdate }) => {
+export const GeometryDashGame: React.FC<{
+  onScoreUpdate: (id: string, s: number) => void;
+  playerName?: string;
+}> = ({ onScoreUpdate, playerName: initialPlayerName }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // App / View Navigation
@@ -105,8 +108,14 @@ export const GeometryDashGame: React.FC<{ onScoreUpdate: (id: string, s: number)
   // Cosmetics & Player Profile
   const [cosmetics, setCosmetics] = useState<PlayerCosmetics>(loadSavedCosmetics);
   const [playerName, setPlayerName] = useState<string>(() => {
-    return localStorage.getItem('gd_player_name_v1') || 'Koşucu ' + Math.floor(100 + Math.random() * 900);
+    return initialPlayerName || localStorage.getItem('gd_player_name_v1') || 'Koşucu ' + Math.floor(100 + Math.random() * 900);
   });
+
+  useEffect(() => {
+    if (initialPlayerName) {
+      setPlayerName(initialPlayerName);
+    }
+  }, [initialPlayerName]);
 
   // Game configuration
   const [countdownNum, setCountdownNum] = useState<number>(3);
